@@ -1,9 +1,12 @@
 import 'dart:async';
 import 'dart:math';
 import 'dart:ui';
+import 'dart:io';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:share_plus/share_plus.dart';
 import 'package:flutter/services.dart';
 import 'package:sensors_plus/sensors_plus.dart';
 import 'package:fl_chart/fl_chart.dart';
@@ -25,38 +28,53 @@ class IsoComfortScreen extends StatefulWidget {
 class _IsoComfortScreenState extends State<IsoComfortScreen>
     with SingleTickerProviderStateMixin {
   StreamSubscription<AccelerometerEvent>? _accelerometerSubscription;
+  //makinecilerin depolama listesi
+  final List<String> _machineDataRows = [];
+  final List<String> _validationRows = [];
   bool _isRunning = false;
 
+//FFT'nin calısması icin gereken veri boyutu
   static const int _fftWindowSize = 512;
   static const double _samplingRate = 50.0;
-  
+//depolama bufferları
   final List<double> _bufferX = [];
   final List<double> _bufferY = [];
   final List<double> _bufferZ = [];
-  
+  final List<double> _timeBuffer = [];
+
   int _tickCount = 0;
   double _timeCounterChart = 0;
   final List<FlSpot> _chartData = [];
   static const int _maxDataPoints = 60;
-  
+// rms skorlarını tutan liste
   final List<double> _sessionRmsScores = [];
 
   double? _gravityX;
   double? _gravityY;
   double? _gravityZ;
+  //Telefonun yerçekimini saf sarsıntıdan ayırmak için kullanılır.
   static const double _alpha = 0.1;
 
   double? _finalRmsAv;
   Position? _currentPosition;
 
   StreamSubscription<Position>? _positionSubscription;
+  //GPS koordinatlarını tutan liste
   final List<LatLng> _routeMap = [];
   double _totalDistanceKm = 0.0;
   DateTime? _testStartTime;
   int _durationSeconds = 0;
 
   DateTime? _lastAnomalyTime;
+  //anomali verilerini tutan liste
   final List<Map<String, dynamic>> _sessionAnomalies = [];
+
+  // Hız ve Sapma Değişkenleri
+  double _currentSpeedKmh = 0.0;
+  double _averageSpeedKmh = 0.0;
+  double _speedDeviation = 0.0; // Standart Sapma (+/-)
+  final List<double> _speedHistory =
+      []; // Sapmayı hesaplamak için tüm hızları burada biriktireceğiz
 
   final TextEditingController _vehicleInfoController = TextEditingController();
   final TextEditingController _tireInfoController = TextEditingController();
@@ -125,8 +143,8 @@ class _IsoComfortScreenState extends State<IsoComfortScreen>
                         decoration: BoxDecoration(
                           color: Colors.white.withOpacity(0.05),
                           borderRadius: BorderRadius.circular(8),
-                          border:
-                              Border.all(color: Colors.blueGrey.withOpacity(0.3)),
+                          border: Border.all(
+                              color: Colors.blueGrey.withOpacity(0.3)),
                         ),
                         child: TextField(
                           controller: _vehicleInfoController,
@@ -150,8 +168,8 @@ class _IsoComfortScreenState extends State<IsoComfortScreen>
                         decoration: BoxDecoration(
                           color: Colors.white.withOpacity(0.05),
                           borderRadius: BorderRadius.circular(8),
-                          border:
-                              Border.all(color: Colors.blueGrey.withOpacity(0.3)),
+                          border: Border.all(
+                              color: Colors.blueGrey.withOpacity(0.3)),
                         ),
                         child: TextField(
                           controller: _tireInfoController,
@@ -175,8 +193,8 @@ class _IsoComfortScreenState extends State<IsoComfortScreen>
                         decoration: BoxDecoration(
                           color: Colors.white.withOpacity(0.05),
                           borderRadius: BorderRadius.circular(8),
-                          border:
-                              Border.all(color: Colors.blueGrey.withOpacity(0.3)),
+                          border: Border.all(
+                              color: Colors.blueGrey.withOpacity(0.3)),
                         ),
                         child: DropdownButtonHideUnderline(
                           child: DropdownButton<String>(
@@ -214,7 +232,8 @@ class _IsoComfortScreenState extends State<IsoComfortScreen>
                               style: ElevatedButton.styleFrom(
                                 backgroundColor: Colors.white10,
                                 foregroundColor: Colors.white,
-                                padding: const EdgeInsets.symmetric(vertical: 16),
+                                padding:
+                                    const EdgeInsets.symmetric(vertical: 16),
                                 shape: RoundedRectangleBorder(
                                     borderRadius: BorderRadius.circular(8)),
                               ),
@@ -229,12 +248,13 @@ class _IsoComfortScreenState extends State<IsoComfortScreen>
                                 backgroundColor:
                                     Colors.greenAccent.withOpacity(0.2),
                                 foregroundColor: Colors.greenAccent,
-                                padding: const EdgeInsets.symmetric(vertical: 16),
+                                padding:
+                                    const EdgeInsets.symmetric(vertical: 16),
                                 shape: RoundedRectangleBorder(
                                     borderRadius: BorderRadius.circular(8),
                                     side: BorderSide(
-                                        color:
-                                            Colors.greenAccent.withOpacity(0.5))),
+                                        color: Colors.greenAccent
+                                            .withOpacity(0.5))),
                               ),
                               onPressed: () {
                                 setState(() {
@@ -244,7 +264,8 @@ class _IsoComfortScreenState extends State<IsoComfortScreen>
                                 _startTest();
                               },
                               child: const Text('ONAYLA',
-                                  style: TextStyle(fontWeight: FontWeight.bold)),
+                                  style:
+                                      TextStyle(fontWeight: FontWeight.bold)),
                             ),
                           ),
                         ],
@@ -266,13 +287,15 @@ class _IsoComfortScreenState extends State<IsoComfortScreen>
       _isRunning = true;
       _finalRmsAv = null;
       _chartData.clear();
+      // Sinyal işleme (FFT) sepetlerini tamamen boşalt.
       _bufferX.clear();
       _bufferY.clear();
       _bufferZ.clear();
+      _timeBuffer.clear();
       _sessionRmsScores.clear();
       _timeCounterChart = 0;
       _tickCount = 0;
-
+// Yerçekimi filtresini ve konumu sıfırla.
       _gravityX = null;
       _gravityY = null;
       _gravityZ = null;
@@ -280,20 +303,29 @@ class _IsoComfortScreenState extends State<IsoComfortScreen>
 
       _routeMap.clear();
       _totalDistanceKm = 0.0;
-      _testStartTime = DateTime.now();
+      _testStartTime = DateTime.now(); //Kronometreyi tam şu an başlat.
       _durationSeconds = 0;
 
       _lastAnomalyTime = null;
       _sessionAnomalies.clear();
-    });
 
+      _currentSpeedKmh = 0.0;
+      _averageSpeedKmh = 0.0;
+      _speedDeviation = 0.0;
+      _speedHistory.clear();
+
+      _machineDataRows.clear();
+      _machineDataRows
+          .add("Zaman_s;Ivme_X;Ivme_Y;Ivme_Z;Frekans_Hz;FFT_X;FFT_Y;FFT_Z");
+    });
+//Arka planda konum takip motorunu çalıştırır.
     _fetchLocationAndStartStream();
 
     _accelerometerSubscription = accelerometerEventStream(
       samplingPeriod: const Duration(milliseconds: 20),
     ).listen((event) {
       if (!_isRunning) return;
-
+// Telefonun durduğu yerdeki 9.81 m/s² olan sabit yerçekimini buluruz (_alpha = 0.1).
       _gravityX = _gravityX == null
           ? event.x
           : _alpha * event.x + (1 - _alpha) * _gravityX!;
@@ -303,29 +335,227 @@ class _IsoComfortScreenState extends State<IsoComfortScreen>
       _gravityZ = _gravityZ == null
           ? event.z
           : _alpha * event.z + (1 - _alpha) * _gravityZ!;
-
+      // Gelen anlık veriden, tespit ettiğimiz bu yerçekimini çıkartırız.
+      // dx, dy, dz: Artık elimizde sadece aracın hareketiyle oluşan SAF SARSINTI var.
       final double dx = event.x - _gravityX!;
       final double dy = event.y - _gravityY!;
       final double dz = event.z - _gravityZ!;
+      //Testin başından beri kaç saniye geçti?
+      double elapsedSeconds = (DateTime.now().millisecondsSinceEpoch -
+              _testStartTime!.millisecondsSinceEpoch) /
+          1000.0;
+      String time = elapsedSeconds.toStringAsFixed(3);
 
+      _machineDataRows.add(
+          "$time;${dx.toStringAsFixed(4)};${dy.toStringAsFixed(4)};${dz.toStringAsFixed(4)};;;;;");
+//// Gelen verileri FFT'de kullanmak üzere hafıza listelerine atıyoruz.
+      _timeBuffer.add(elapsedSeconds);
       _bufferX.add(dx);
       _bufferY.add(dy);
       _bufferZ.add(dz);
-      _tickCount++;
+      _tickCount++; //// Sepete giren yeni veri sayısını tutar.
 
+      // Sepetimizin maksimum kapasitesi _fftWindowSize (512).
+      // Kapasite dolarsa, sepetin dibindeki en eski 1. veriyi (index 0) çöpe atıyoruz.
+      // Böylece elimizde her zaman en güncel 512 verilik bir paket kalıyor.
       if (_bufferX.length > _fftWindowSize) {
         _bufferX.removeAt(0);
         _bufferY.removeAt(0);
         _bufferZ.removeAt(0);
+        _timeBuffer.removeAt(0);
       }
-
+      // Eğer sepet tam kapasiteye (512) ulaştıysa VE içeriye tam 1 saniyelik (50 adet) YENİ veri girdiyse...
       if (_bufferX.length == _fftWindowSize && _tickCount >= 50) {
-        _tickCount = 0;
-        _calculateBlockRms();
+        _tickCount = 0; // Sayacı sıfırla.
+        _calculateBlockRms(); // Konfor skorunu hesapla, grafiği çizdir
       }
     });
   }
 
+  void _calculateBlockRms() {
+    double totalTime = _timeBuffer.last - _timeBuffer.first;
+    // N-1 verinin geliş süresine bakarak o anki 'Gerçek Frekansı (Hz)' hesaplıyoruz.
+    double realFs = (_fftWindowSize - 1) / totalTime;
+    //FFT sonucunda her bir adımın kaç Hz'e denk geldiğini buluyoruz
+    final double df = realFs / _fftWindowSize;
+
+    // --- 1. DC COMPONENT TEMİZLİĞİ (ZERO-MEAN / DETRENDING) ---
+    double meanX = _bufferX.reduce((a, b) => a + b) / _fftWindowSize;
+    double meanY = _bufferY.reduce((a, b) => a + b) / _fftWindowSize;
+    double meanZ = _bufferZ.reduce((a, b) => a + b) / _fftWindowSize;
+
+    // KRİTİK DÜZELTME: Orijinal buffer'ı BOZMADAN, hesaplama için geçici kopya listeler oluşturuyoruz.
+    // Böylece CSV'ye basılacak ham veri korunmuş oluyor ve Sliding Window mantığı bozulmuyor.
+    List<double> detrendedX = _bufferX.map((e) => e - meanX).toList();
+    List<double> detrendedY = _bufferY.map((e) => e - meanY).toList();
+    List<double> detrendedZ = _bufferZ.map((e) => e - meanZ).toList();
+    // ----------------------------------------------------------
+
+    // --- 2. WINDOWING (SİNYAL PÜRÜZSÜZLEŞTİRME) ---
+    // 1.852 Katsayısının Anlamı (Amplitude Correction Factor):
+    // Hanning/Hamming penceresi sinyalin kenarlarını sıfıra bastırırken toplam enerjiyi azaltır (Coherent Gain ~ 0.54).
+    // Sinyalin genliğini gerçek fiziksel seviyesine geri çekmek için (1 / 0.54 = 1.8518...) katsayısı ile çarpılır.
+    List<double> windowedX = List.generate(_fftWindowSize, (i) {
+      double w = (0.54 - 0.46 * cos(2 * pi * i / (_fftWindowSize - 1))) * 1.852;
+      return detrendedX[i] *
+          w; // Orijinal _bufferX yerine detrendedX kullanıldı
+    });
+
+    List<double> windowedY = List.generate(_fftWindowSize, (i) {
+      double w = (0.54 - 0.46 * cos(2 * pi * i / (_fftWindowSize - 1))) * 1.852;
+      return detrendedY[i] *
+          w; // Orijinal _bufferY yerine detrendedY kullanıldı
+    });
+
+    List<double> windowedZ = List.generate(_fftWindowSize, (i) {
+      double w = (0.54 - 0.46 * cos(2 * pi * i / (_fftWindowSize - 1))) * 1.852;
+      return detrendedZ[i] *
+          w; // Orijinal _bufferZ yerine detrendedZ kullanıldı
+    });
+
+    final fft = FFT(_fftWindowSize);
+    //saf frekansa ayrıştırma işlemi(çorba örneği)
+    final resX = fft.realFft(windowedX);
+    final resY = fft.realFft(windowedY);
+    final resZ = fft.realFft(windowedZ);
+//sarsıntıların şiddetini biriktirip olusturulan sepet
+    double sumSqX = 0;
+    double sumSqY = 0;
+    double sumSqZ = 0;
+// FFT'ninçıkardığı sonuçların ikinci yarısı, ilk yarısının aynısıdır (Buna Nyquist Teoremi denir)
+    for (int i = 1; i < _fftWindowSize ~/ 2; i++) {
+      //Bandın üzerinden o an geçen titreşimin frekansını (Hz) hesaplıyoruz
+      double f = i * df;
+      //sarsıntının gerçek "Büyüklüğünü (magX)" buluyoruz.(Dik kenarların karelerinin toplamının karekökü)
+      double magX = sqrt(resX[i].x * resX[i].x + resX[i].y * resX[i].y);
+      double magY = sqrt(resY[i].x * resY[i].x + resY[i].y * resY[i].y);
+      double magZ = sqrt(resZ[i].x * resZ[i].x + resZ[i].y * resZ[i].y);
+
+      // Gerçek fiziksel genliğe (m/s²) dönüştürme işlemi (Normalizasyon)
+      double ampX = magX / (_fftWindowSize / 2);
+      double ampY = magY / (_fftWindowSize / 2);
+      double ampZ = magZ / (_fftWindowSize / 2);
+      //makinecilerin verilerini csv ye yazdırma islemi
+      if (i == 1) {
+        double elapsedSeconds = (DateTime.now().millisecondsSinceEpoch -
+                _testStartTime!.millisecondsSinceEpoch) /
+            1000.0;
+        String time = elapsedSeconds.toStringAsFixed(3);
+        _machineDataRows.add(
+            "$time;;;;${f.toStringAsFixed(2)};${ampX.toStringAsFixed(4)};${ampY.toStringAsFixed(4)};${ampZ.toStringAsFixed(4)}");
+      } else {
+        _machineDataRows.add(
+            ";;;;${f.toStringAsFixed(2)};${ampX.toStringAsFixed(4)};${ampY.toStringAsFixed(4)};${ampZ.toStringAsFixed(4)}");
+      }
+      //insan hassasiyeti filtresi(karınca ornegi)-ıso 2631
+      // --- MAKİNE EKİBİ HASSAS KATSAYILARI İLE DOĞRU RMS HESAPLAMA ---
+      // 1. Hassas ISO katsayılarını çekiyoruz
+      double wd = _getWdWeighting(f);
+      double wk = _getWkWeighting(f);
+
+      // 2. Agirliklandirilmis_X = FFT_X * Wd
+      double weightedX = ampX * wd;
+      double weightedY = ampY * wd;
+      double weightedZ = ampZ * wk;
+
+      // 3. FİZİKTEKİ DOĞRU GÜÇ HESABI (PARSEVAL TEOREMİ)
+      // Senin eski kodunda olduğu gibi, toplamı nBins'e BÖLMÜYORUZ.
+      // Sadece (Genlik^2) / 2 formülüyle gerçek enerjiyi sepete atıyoruz.
+      sumSqX += (weightedX * weightedX) / 2.0;
+      sumSqY += (weightedY * weightedY) / 2.0;
+      sumSqZ += (weightedZ * weightedZ) / 2.0;
+    } // <-- FOR DÖNGÜSÜNÜN BİTİŞİ BURASI
+
+    // 4. Gerçek enerjiyi bulmak için doğrudan karekök alıyoruz (Bölme yok!)
+    double rmsX = sqrt(sumSqX);
+    double rmsY = sqrt(sumSqY);
+    double rmsZ = sqrt(sumSqZ);
+
+    // 5. Üç eksenin toplam bileşkesi (Bileşke RMS)
+    double finalBlockAv = sqrt(rmsX * rmsX + rmsY * rmsY + rmsZ * rmsZ);
+
+    if (finalBlockAv > 1.25) {
+      // Bu skor 1.25'ten büyük mü? Demek ki çok rahatsız edici bir çukura veya kasise girdik!" diyor.
+      if (finalBlockAv > 2.5) {
+        HapticFeedback.heavyImpact(); //guclu titresim veriyor.
+      } else {
+        HapticFeedback.mediumImpact(); //orta derecede titresim veriyor.
+      }
+
+      // 2. Anomaliyi Kaydetme (Database İçin)
+      final now = DateTime.now();
+      if (_lastAnomalyTime == null ||
+          //"Bir çukur tespit edip kaydettiysen, 2.5 saniye boyunca gözlerini kapat.
+          // Aynı çukurun yankılarını tekrar tekrar kaydetme.".
+          now.difference(_lastAnomalyTime!).inMilliseconds > 2500) {
+        _lastAnomalyTime = now;
+        //Test bitince haritada gördüğün o yuvarlak kırmızı uyarı işaretleri, tam olarak bu listedeki koordinatlara bakılarak çiziliyor
+        if (_currentPosition != null) {
+          _sessionAnomalies.add({
+            'lat': _currentPosition!.latitude,
+            'lng': _currentPosition!.longitude,
+            'timestamp': now.toIso8601String(),
+            'peak_score': finalBlockAv
+          });
+        }
+      }
+    }
+    // --- GEÇİCİ DOĞRULAMA CSV'Sİ DOLDURMA ALANI ---
+    if (_validationRows.isEmpty) {
+      // 1. Senin ve Makine ekibinin istediği yeni başlıklar:
+      _validationRows
+          .add("Zaman_s;Ivme_X;Ivme_Y;Ivme_Z;Frekans_Hz;FFT_X;FFT_Y;FFT_Z");
+
+      double realFs = 50.0; // Saniyedeki veri sayımız (50 Hz)
+      double df =
+          realFs / _fftWindowSize; // Her bir FFT adımının Frekans karşılığı
+
+      for (int i = 0; i < _fftWindowSize; i++) {
+        // İndeks yerine tam Zamanı (Saniye) hesaplıyoruz
+        double timeSec = i * (1.0 / realFs);
+        String t = timeSec.toStringAsFixed(3);
+
+        String rawX = _bufferX[i].toStringAsFixed(4);
+        String rawY = _bufferY[i].toStringAsFixed(4);
+        String rawZ = _bufferZ[i].toStringAsFixed(4);
+
+        if (i < _fftWindowSize ~/ 2) {
+          // Frekansı hesaplıyoruz (Hz)
+          double f = i * df;
+
+          double mX = sqrt(resX[i].x * resX[i].x + resX[i].y * resX[i].y);
+          double mY = sqrt(resY[i].x * resY[i].x + resY[i].y * resY[i].y);
+          double mZ = sqrt(resZ[i].x * resZ[i].x + resZ[i].y * resZ[i].y);
+
+          double aX = mX / (_fftWindowSize / 2);
+          double aY = mY / (_fftWindowSize / 2);
+          double aZ = mZ / (_fftWindowSize / 2);
+
+          // Frekans sütunu eklendi
+          _validationRows.add(
+              "$t;$rawX;$rawY;$rawZ;${f.toStringAsFixed(2)};${aX.toStringAsFixed(4)};${aY.toStringAsFixed(4)};${aZ.toStringAsFixed(4)}");
+        } else {
+          // FFT'nin olmadığı alt satırlarda frekans ve FFT sütunları boş bırakılıyor
+          _validationRows.add("$t;$rawX;$rawY;$rawZ;;;;");
+        }
+      }
+    }
+    // ----------------------------------------------
+
+    setState(() {
+      _sessionRmsScores.add(finalBlockAv);
+      _finalRmsAv = finalBlockAv;
+
+      _chartData.add(FlSpot(_timeCounterChart, finalBlockAv));
+      _timeCounterChart += 1;
+
+      if (_chartData.length > _maxDataPoints) {
+        _chartData.removeAt(0);
+      }
+    });
+  }
+
+  //uygulama konum ayarlaeını acıp acmadıgını kontrol ediyor sonrasında ise toplam kaç km gidildigini hesaplıyor
   Future<void> _fetchLocationAndStartStream() async {
     bool serviceEnabled;
     LocationPermission permission;
@@ -342,140 +572,225 @@ class _IsoComfortScreenState extends State<IsoComfortScreen>
     if (permission == LocationPermission.deniedForever) return;
 
     try {
-      _currentPosition = await Geolocator.getCurrentPosition(desiredAccuracy: LocationAccuracy.high);
+      _currentPosition = await Geolocator.getCurrentPosition(
+          desiredAccuracy: LocationAccuracy.high);
       if (_currentPosition != null && _isRunning) {
-         setState(() {
-            _routeMap.add(LatLng(_currentPosition!.latitude, _currentPosition!.longitude));
-         });
+        setState(() {
+          _routeMap.add(
+              LatLng(_currentPosition!.latitude, _currentPosition!.longitude));
+        });
       }
     } catch (e) {
       debugPrint("Init loc failed: $e");
     }
 
     _positionSubscription = Geolocator.getPositionStream(
-      locationSettings: const LocationSettings(accuracy: LocationAccuracy.high, distanceFilter: 2),
+      locationSettings: const LocationSettings(
+          accuracy: LocationAccuracy.high, distanceFilter: 2),
     ).listen((Position position) {
       if (!_isRunning) return;
-
       if (position.accuracy > 25.0) return;
 
       final newPoint = LatLng(position.latitude, position.longitude);
-      
-      if (_routeMap.isNotEmpty && _currentPosition != null) {
-         final distance = const Distance().as(LengthUnit.Meter, _routeMap.last, newPoint);
-         
-         final timeDiff = position.timestamp.difference(_currentPosition!.timestamp).inMilliseconds / 1000.0;
-         
-         if (timeDiff > 0) {
-            final speedMs = distance / timeDiff;
-            if (speedMs > 45.0) return;
-         }
 
-         if (distance < 3.0) {
-            _currentPosition = position;
-            return;
-         }
+      // m/s cinsinden gelen hızı 3.6 ile çarparak km/h'ye çeviriyoruz.
+      // GPS bazen hata verip negatif hız döndürebilir, onu sıfıra eşitliyoruz.
+      double currentSpeed = position.speed * 3.6;
+      if (currentSpeed < 0) currentSpeed = 0.0;
 
-         setState(() {
-            _totalDistanceKm += distance / 1000.0;
-            _currentPosition = position;
-            _routeMap.add(newPoint);
-            if (_testStartTime != null) {
-              _durationSeconds = DateTime.now().difference(_testStartTime!).inSeconds;
-            }
-         });
-      } else {
-         setState(() {
-            _currentPosition = position;
-            _routeMap.add(newPoint);
-         });
-      }
-    });
-  }
+      setState(() {
+        _currentSpeedKmh = currentSpeed;
 
-  double _getWdWeighting(double f) {
-    if (f <= 0.0) return 0.0;
-    if (f < 0.5) return f / 0.5;
-    if (f >= 0.5 && f <= 2.0) return 1.0;
-    return 2.0 / f;
-  }
-
-  double _getWbWeighting(double f) {
-    if (f <= 0.0) return 0.0;
-    if (f < 1.0) return 0.5;
-    if (f >= 1.0 && f < 4.0) return 0.5 * sqrt(f / 1.0);
-    if (f >= 4.0 && f <= 8.0) return 1.0;
-    return 8.0 / f;
-  }
-
-  void _calculateBlockRms() {
-    final fft = FFT(_fftWindowSize);
-    final resX = fft.realFft(_bufferX);
-    final resY = fft.realFft(_bufferY);
-    final resZ = fft.realFft(_bufferZ);
-
-    double sumSqX = 0;
-    double sumSqY = 0;
-    double sumSqZ = 0;
-
-    final double df = _samplingRate / _fftWindowSize;
-
-    for (int i = 1; i < _fftWindowSize ~/ 2; i++) {
-      double f = i * df;
-
-      double magX = sqrt(resX[i].x * resX[i].x + resX[i].y * resX[i].y);
-      double magY = sqrt(resY[i].x * resY[i].x + resY[i].y * resY[i].y);
-      double magZ = sqrt(resZ[i].x * resZ[i].x + resZ[i].y * resZ[i].y);
-
-      // Energy Density
-      double powerX = (magX * magX) * 2 / (_fftWindowSize * _fftWindowSize);
-      double powerY = (magY * magY) * 2 / (_fftWindowSize * _fftWindowSize);
-      double powerZ = (magZ * magZ) * 2 / (_fftWindowSize * _fftWindowSize);
-
-      double wd = _getWdWeighting(f);
-      double wb = _getWbWeighting(f);
-
-      sumSqX += powerX * wd * wd;
-      sumSqY += powerY * wd * wd;
-      sumSqZ += powerZ * wb * wb;
-    }
-
-    double awx = sqrt(sumSqX);
-    double awy = sqrt(sumSqY);
-    double awz = sqrt(sumSqZ);
-
-    double finalBlockAv = sqrt(awx * awx + awy * awy + awz * awz);
-
-    if (finalBlockAv > 1.25) {
-      final now = DateTime.now();
-      if (_lastAnomalyTime == null || now.difference(_lastAnomalyTime!).inMilliseconds > 2500) {
-        _lastAnomalyTime = now;
-        if (_currentPosition != null) {
-          _sessionAnomalies.add({
-             'lat': _currentPosition!.latitude,
-             'lng': _currentPosition!.longitude,
-             'timestamp': now.toIso8601String(),
-             'peak_score': finalBlockAv
-          });
-          HapticFeedback.heavyImpact();
+        // Araç durmuyorsa (kırmızı ışıkta vb. beklemiyorsa) hızı listeye kaydet.
+        // Sıfırları listeye doldurmak ortalama hızı ve sapmayı bozar.
+        if (currentSpeed > 2.0) {
+          _speedHistory.add(currentSpeed);
+          _calculateSpeedStats(); // YENİ: Canlı güncellenmesi için buraya ekledik!
         }
-      }
-    } else if (finalBlockAv > 2.5) {
-      HapticFeedback.heavyImpact();
-    }
+      });
 
-    setState(() {
-      _sessionRmsScores.add(finalBlockAv);
-      _finalRmsAv = finalBlockAv;
-      
-      _chartData.add(FlSpot(_timeCounterChart, finalBlockAv));
-      _timeCounterChart += 1;
+      if (_routeMap.isNotEmpty && _currentPosition != null) {
+        final distance =
+            const Distance().as(LengthUnit.Meter, _routeMap.last, newPoint);
+        final timeDiff = position.timestamp
+                .difference(_currentPosition!.timestamp)
+                .inMilliseconds /
+            1000.0;
 
-      if (_chartData.length > _maxDataPoints) {
-        _chartData.removeAt(0);
+        if (timeDiff > 0) {
+          final speedMs = distance / timeDiff;
+          if (speedMs > 45.0) return;
+        }
+
+        if (distance < 3.0) {
+          _currentPosition = position;
+          return;
+        }
+        setState(() {
+          _totalDistanceKm += distance / 1000.0;
+          _currentPosition = position;
+          _routeMap.add(newPoint);
+          if (_testStartTime != null) {
+            _durationSeconds =
+                DateTime.now().difference(_testStartTime!).inSeconds;
+          }
+        });
+      } else {
+        setState(() {
+          _currentPosition = position;
+          _routeMap.add(newPoint);
+        });
       }
     });
   }
+
+  //FFT'den gelen her bir frekansı alır, hangi aralığa düştüğüne bakar ve
+  // o frekansın RMS hesabında kullanılacak 0 ile 1 arasındaki çarpım katsayısını belirler.
+  // --- MAKİNE EKİBİ ISO 2631 HASSAS KATSAYILARI VE İNTERPOLASYON MOTORU ---
+  static const List<double> _isoFreqs = [
+    0.1,
+    0.125,
+    0.16,
+    0.2,
+    0.25,
+    0.315,
+    0.4,
+    0.5,
+    0.63,
+    0.8,
+    1.0,
+    1.25,
+    1.6,
+    2.0,
+    2.5,
+    3.15,
+    4.0,
+    5.0,
+    6.3,
+    8.0,
+    10.0,
+    12.5,
+    16.0,
+    20.0,
+    25.0,
+    31.5,
+    40.0,
+    50.0,
+    63.0,
+    80.0,
+    100.0,
+    125.0,
+    160.0,
+    200.0,
+    250.0,
+    315.0,
+    400.0
+  ];
+
+  // Python kodundaki / 1000 işlemi Dart'ta listeye işlenmiştir
+  static const List<double> _wkRaw = [
+    0.0312,
+    0.0486,
+    0.079,
+    0.121,
+    0.182,
+    0.263,
+    0.352,
+    0.418,
+    0.459,
+    0.477,
+    0.482,
+    0.484,
+    0.494,
+    0.531,
+    0.631,
+    0.804,
+    0.967,
+    1.039,
+    1.054,
+    1.036,
+    0.988,
+    0.902,
+    0.768,
+    0.636,
+    0.513,
+    0.405,
+    0.314,
+    0.246,
+    0.186,
+    0.132,
+    0.0887,
+    0.054,
+    0.0285,
+    0.0152,
+    0.0079,
+    0.00398,
+    0.00195
+  ];
+
+  static const List<double> _wdRaw = [
+    0.0624,
+    0.0973,
+    0.158,
+    0.243,
+    0.365,
+    0.530,
+    0.713,
+    0.853,
+    0.944,
+    0.992,
+    1.011,
+    1.008,
+    0.968,
+    0.890,
+    0.776,
+    0.642,
+    0.512,
+    0.409,
+    0.323,
+    0.253,
+    0.212,
+    0.161,
+    0.125,
+    0.100,
+    0.080,
+    0.0632,
+    0.0494,
+    0.0388,
+    0.0295,
+    0.0211,
+    0.0141,
+    0.00863,
+    0.00455,
+    0.00243,
+    0.00126,
+    0.00064,
+    0.00031
+  ];
+
+  // Python'daki numpy.interp fonksiyonunun birebir Dart karşılığı
+  double _interp(double x, List<double> xp, List<double> fp) {
+    if (x <= xp.first) return fp.first;
+    if (x >= xp.last) return fp.last;
+    for (int i = 0; i < xp.length - 1; i++) {
+      if (x >= xp[i] && x <= xp[i + 1]) {
+        double t = (x - xp[i]) / (xp[i + 1] - xp[i]);
+        return fp[i] + t * (fp[i + 1] - fp[i]);
+      }
+    }
+    return 0.0;
+  }
+
+  // X ve Y ekseni için
+  double _getWdWeighting(double f) {
+    return _interp(f, _isoFreqs, _wdRaw);
+  }
+
+  // Z ekseni için (Makine ekibinin kullandığı standart)
+  double _getWkWeighting(double f) {
+    return _interp(f, _isoFreqs, _wkRaw);
+  }
+  // --------------------------------------------------------------------------
 
   void _stopTest() {
     if (!_isRunning) return;
@@ -494,9 +809,64 @@ class _IsoComfortScreenState extends State<IsoComfortScreen>
     setState(() {
       _isRunning = false;
     });
-    
+
+    _calculateSpeedStats();
     _calculateIsoComfort();
+    _autoExportMachineData();
   }
+
+  void _calculateSpeedStats() {
+    if (_speedHistory.isEmpty) return;
+
+    // 1. Ortalama Hızı Hesapla (Tüm hızları topla ve eleman sayısına böl)
+    double sum = 0;
+    for (double speed in _speedHistory) {
+      sum += speed;
+    }
+    _averageSpeedKmh = sum / _speedHistory.length;
+
+    // 2. Standart Sapmayı (Dalgalanmayı) Hesapla
+    double varianceSum = 0;
+    for (double speed in _speedHistory) {
+      // (Anlık Hız - Ortalama Hız) değerinin karesini alıp topluyoruz
+      varianceSum += pow(speed - _averageSpeedKmh, 2);
+    }
+
+    // Varyansın karekökünü alarak sapma miktarını buluyoruz
+    _speedDeviation = sqrt(varianceSum / _speedHistory.length);
+  }
+
+  Future<void> _autoExportMachineData() async {
+    if (_validationRows.isEmpty)
+      return; // Eski listeyi değil, yenisini kontrol ediyoruz
+    try {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('⏳ Doğrulama verisi hazırlanıyor...')),
+        );
+      }
+      final directory = await getTemporaryDirectory();
+      final file = File('${directory.path}/FFT_Dogrulama_Verisi.csv');
+      await file.writeAsString(_validationRows.join('\n'));
+      await Share.shareXFiles([XFile(file.path)],
+          text: 'MATLAB Doğrulama Verisi (512 Ham vs 256 FFT)');
+    } catch (e) {
+      debugPrint("Auto-Export Error: $e");
+    }
+  }
+
+  //_calculateIsoComfort() fonksiyonu,
+  //test bittiğinde yolculuğun genel konfor skorunu hesaplayarak tüm sürüş verilerini
+  //veritabanına kalıcı olarak kaydeder.
+  // İlk olarak, test boyunca saniyede bir toplanan sarsıntı skorlarının
+  // (_sessionRmsScores) karelerinin ortalamasının karekökünü alarak (RMS yöntemiyle)
+  // yolculuğun nihai konfor değerini (_finalRmsAv) hesaplar.
+  // Ardından; başlangıç ve bitiş koordinatları, toplam mesafe, süre, kullanıcıdan alınan araç/lastik bilgileri, telefon konumu ve JSON formatına çevrilmiş harita rotası gibi
+  // tüm parametreleri tek bir veri paketi (testData) haline getirir.
+  // Son olarak, bu paketi veritabanına (DatabaseHelper.instance.insertTest)
+  // yeni bir sürüş oturumu olarak kaydeder ve
+  // yolculuk sırasında tespit edilen tüm anomalileri de bu oturum kimliğiyle (session_id)
+  // veritabanına ekleyerek işlemi tamamlar.
 
   Future<void> _calculateIsoComfort() async {
     if (_sessionRmsScores.isEmpty) {
@@ -533,21 +903,30 @@ class _IsoComfortScreenState extends State<IsoComfortScreen>
     final testData = {
       'timestamp': now.toIso8601String(),
       'score': _finalRmsAv,
-      'latitude': _currentPosition?.latitude, 
+      'latitude': _currentPosition?.latitude,
       'longitude': _currentPosition?.longitude,
-      'note': '', 
+      'note': '',
       'distance_km': _totalDistanceKm,
       'duration_seconds': _durationSeconds,
+      'average_speed': _averageSpeedKmh, // YENİ
+      'speed_deviation': _speedDeviation, // YENİ
       'start_lat': startLat,
       'start_lng': startLng,
       'end_lat': endLat,
       'end_lng': endLng,
       'anomaly_count': _sessionAnomalies.length,
-      'vehicle_info': _vehicleInfoController.text.trim().isEmpty ? null : _vehicleInfoController.text.trim(),
-      'tire_info': _tireInfoController.text.trim().isEmpty ? null : _tireInfoController.text.trim(),
+      'vehicle_info': _vehicleInfoController.text.trim().isEmpty
+          ? null
+          : _vehicleInfoController.text.trim(),
+      'tire_info': _tireInfoController.text.trim().isEmpty
+          ? null
+          : _tireInfoController.text.trim(),
       'phone_placement': _selectedPhonePlacement,
-      'route_points': jsonEncode(_routeMap.map((ll) => {'lat': ll.latitude, 'lng': ll.longitude}).toList())
+      'route_points': jsonEncode(_routeMap
+          .map((ll) => {'lat': ll.latitude, 'lng': ll.longitude})
+          .toList())
     };
+
     int newSessionId = await DatabaseHelper.instance.insertTest(testData);
 
     for (var anomaly in _sessionAnomalies) {
@@ -571,11 +950,12 @@ class _IsoComfortScreenState extends State<IsoComfortScreen>
         height: 250,
         decoration: BoxDecoration(color: Colors.white.withOpacity(0.02)),
         child: const Center(
-          child: Text('GPS Sinyali Bekleniyor...', style: TextStyle(color: Colors.blueGrey)),
+          child: Text('GPS Sinyali Bekleniyor...',
+              style: TextStyle(color: Colors.blueGrey)),
         ),
       );
     }
-    
+
     return SizedBox(
       height: 250,
       child: FlutterMap(
@@ -585,11 +965,12 @@ class _IsoComfortScreenState extends State<IsoComfortScreen>
         ),
         children: [
           ColorFiltered(
-             colorFilter: const ColorFilter.mode(Colors.black54, BlendMode.darken),
-             child: TileLayer(
-               urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
-               userAgentPackageName: 'com.example.konfor_olcer',
-             ),
+            colorFilter:
+                const ColorFilter.mode(Colors.black54, BlendMode.darken),
+            child: TileLayer(
+              urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+              userAgentPackageName: 'com.example.konfor_olcer',
+            ),
           ),
           PolylineLayer(
             polylines: [
@@ -607,30 +988,33 @@ class _IsoComfortScreenState extends State<IsoComfortScreen>
                   point: _routeMap.first,
                   width: 20,
                   height: 20,
-                  child: const Icon(Icons.circle, color: Colors.blueAccent, size: 14),
+                  child: const Icon(Icons.circle,
+                      color: Colors.blueAccent, size: 14),
                 ),
               if (_routeMap.length > 1)
                 Marker(
                   point: _routeMap.last,
                   width: 20,
                   height: 20,
-                  child: const Icon(Icons.my_location, color: Color(0xFF39FF14), size: 16),
+                  child: const Icon(Icons.my_location,
+                      color: Color(0xFF39FF14), size: 16),
                 ),
               ..._sessionAnomalies.map((a) {
                 return Marker(
-                  point: LatLng(a['lat'], a['lng']),
-                  width: 40,
-                  height: 40,
-                  child: Container(
-                    decoration: BoxDecoration(
-                      shape: BoxShape.circle,
-                      boxShadow: [
-                         BoxShadow(color: const Color(0xFFFF3131).withOpacity(0.5), blurRadius: 12, spreadRadius: 4)
-                      ]
-                    ),
-                    child: const Icon(Icons.warning_amber_rounded, color: Color(0xFFFF3131), size: 28),
-                  )
-                );
+                    point: LatLng(a['lat'], a['lng']),
+                    width: 40,
+                    height: 40,
+                    child: Container(
+                      decoration:
+                          BoxDecoration(shape: BoxShape.circle, boxShadow: [
+                        BoxShadow(
+                            color: const Color(0xFFFF3131).withOpacity(0.5),
+                            blurRadius: 12,
+                            spreadRadius: 4)
+                      ]),
+                      child: const Icon(Icons.warning_amber_rounded,
+                          color: Color(0xFFFF3131), size: 28),
+                    ));
               }),
             ],
           ),
@@ -680,8 +1064,8 @@ class _IsoComfortScreenState extends State<IsoComfortScreen>
             begin: Alignment.topCenter,
             end: Alignment.bottomCenter,
             colors: [
-              Color(0xFF0F172A), 
-              Color(0xFF020617), 
+              Color(0xFF0F172A),
+              Color(0xFF020617),
             ],
           ),
         ),
@@ -764,7 +1148,6 @@ class _IsoComfortScreenState extends State<IsoComfortScreen>
                   ],
                 ),
                 const SizedBox(height: 16),
-
                 Expanded(
                   flex: 2,
                   child: _GlassCard(
@@ -794,41 +1177,87 @@ class _IsoComfortScreenState extends State<IsoComfortScreen>
                   ),
                 ),
                 const SizedBox(height: 16),
-
                 Expanded(
-                  flex: 3,
-                  child: _GlassCard(
-                    child: Padding(
-                      padding: const EdgeInsets.all(12.0),
-                      child: Column(
-                        children: [
-                           Row(
-                             mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                             children: [
-                               const Text('GÜZERGAH & MESAFE', style: TextStyle(color: Colors.blueGrey, fontWeight: FontWeight.bold, fontSize: 12)),
-                               Row(
-                                 children: [
-                                    if (_sessionAnomalies.isNotEmpty) ...[
-                                      const Icon(Icons.warning_amber_rounded, color: Color(0xFFFF3131), size: 14),
-                                      const SizedBox(width: 4),
-                                      Text('Anomali: ${_sessionAnomalies.length}', style: const TextStyle(color: Color(0xFFFF3131), fontWeight: FontWeight.bold, fontSize: 12)),
-                                      const SizedBox(width: 12),
-                                    ],
-                                    Text('${_totalDistanceKm.toStringAsFixed(2)} km  •  $_durationSeconds sn', style: const TextStyle(color: Colors.greenAccent, fontWeight: FontWeight.bold, fontSize: 12))
-                                 ]
-                               )
-                             ]
-                           ),
-                           const SizedBox(height: 12),
-                           Expanded(child: ClipRRect(borderRadius: BorderRadius.circular(8), child: _buildMap())),
-                        ]
-                      )
-                    )
-                  )
-                ),
-                
-                const SizedBox(height: 16),
+                    flex: 3,
+                    child: _GlassCard(
+                        child: Padding(
+                            padding: const EdgeInsets.all(12.0),
+                            child: Column(children: [
+                              Row(
+                                  mainAxisAlignment:
+                                      MainAxisAlignment.spaceBetween,
+                                  children: [
+                                    const Text('GÜZERGAH & MESAFE',
+                                        style: TextStyle(
+                                            color: Colors.blueGrey,
+                                            fontWeight: FontWeight.bold,
+                                            fontSize: 12)),
+                                    Row(children: [
+                                      if (_sessionAnomalies.isNotEmpty) ...[
+                                        const Icon(Icons.warning_amber_rounded,
+                                            color: Color(0xFFFF3131), size: 14),
+                                        const SizedBox(width: 4),
+                                        Text(
+                                            'Anomali: ${_sessionAnomalies.length}',
+                                            style: const TextStyle(
+                                                color: Color(0xFFFF3131),
+                                                fontWeight: FontWeight.bold,
+                                                fontSize: 12)),
+                                        const SizedBox(width: 12),
+                                      ],
+                                      Text(
+                                          '${_totalDistanceKm.toStringAsFixed(2)} km  •  $_durationSeconds sn',
+                                          style: const TextStyle(
+                                              color: Colors.greenAccent,
+                                              fontWeight: FontWeight.bold,
+                                              fontSize: 12))
+                                    ])
+                                  ]),
 
+                              // ---- YENİ EKLENEN CANLI HIZ PANELİ ----
+                              const SizedBox(height: 8),
+                              Container(
+                                padding: const EdgeInsets.symmetric(
+                                    horizontal: 12, vertical: 8),
+                                decoration: BoxDecoration(
+                                    color: Colors.white.withOpacity(0.05),
+                                    borderRadius: BorderRadius.circular(8),
+                                    border: Border.all(
+                                        color:
+                                            Colors.blueGrey.withOpacity(0.2))),
+                                child: Row(
+                                  mainAxisAlignment:
+                                      MainAxisAlignment.spaceBetween,
+                                  children: [
+                                    Text(
+                                        'Anlık: ${_currentSpeedKmh.toStringAsFixed(1)} km/sa',
+                                        style: const TextStyle(
+                                            color: Colors.white,
+                                            fontSize: 11,
+                                            fontWeight: FontWeight.bold)),
+                                    Text(
+                                        'Ortalama: ${_averageSpeedKmh.toStringAsFixed(1)} km/s',
+                                        style: const TextStyle(
+                                            color: Colors.white70,
+                                            fontSize: 11)),
+                                    Text(
+                                        'Sapma: ±${_speedDeviation.toStringAsFixed(1)}',
+                                        style: const TextStyle(
+                                            color: Colors.orangeAccent,
+                                            fontSize: 11,
+                                            fontWeight: FontWeight.bold)),
+                                  ],
+                                ),
+                              ),
+                              // ---------------------------------------
+
+                              const SizedBox(height: 12),
+                              Expanded(
+                                  child: ClipRRect(
+                                      borderRadius: BorderRadius.circular(8),
+                                      child: _buildMap())),
+                            ])))),
+                const SizedBox(height: 16),
                 Expanded(
                   flex: 2,
                   child: _GlassCard(
@@ -897,7 +1326,8 @@ class _IsoComfortScreenState extends State<IsoComfortScreen>
                                 maxY: 10,
                                 minX: minX,
                                 maxX: maxX,
-                                lineTouchData: const LineTouchData(enabled: false),
+                                lineTouchData:
+                                    const LineTouchData(enabled: false),
                                 gridData: const FlGridData(
                                   show: false,
                                 ),
@@ -907,7 +1337,8 @@ class _IsoComfortScreenState extends State<IsoComfortScreen>
                                       showTitles: true,
                                       reservedSize: 32,
                                       getTitlesWidget: (value, meta) => Padding(
-                                        padding: const EdgeInsets.only(right: 8.0),
+                                        padding:
+                                            const EdgeInsets.only(right: 8.0),
                                         child: Text(
                                           value.toInt().toString(),
                                           textAlign: TextAlign.right,
@@ -943,8 +1374,10 @@ class _IsoComfortScreenState extends State<IsoComfortScreen>
                                       show: true,
                                       gradient: LinearGradient(
                                         colors: [
-                                          const Color(0xFF39FF14).withOpacity(0.35),
-                                          const Color(0xFF39FF14).withOpacity(0.01),
+                                          const Color(0xFF39FF14)
+                                              .withOpacity(0.35),
+                                          const Color(0xFF39FF14)
+                                              .withOpacity(0.01),
                                         ],
                                         begin: Alignment.topCenter,
                                         end: Alignment.bottomCenter,
@@ -1082,7 +1515,7 @@ class _ArcGaugePainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {
     final Rect rect = Rect.fromCenter(
-      center: Offset(size.width / 2, size.height), 
+      center: Offset(size.width / 2, size.height),
       width: size.width,
       height: size.height * 2,
     );
@@ -1115,7 +1548,6 @@ class _ArcGaugePainter extends CustomPainter {
 
     final double renderedValue = value.clamp(0.0, maxLimit);
     final double activeSweepAngle = (renderedValue / maxLimit) * pi;
-
     canvas.drawArc(rect, startAngle, activeSweepAngle, false, activePaint);
 
     final Paint tickPaint = Paint()

@@ -28,7 +28,9 @@ class _HistoryScreenState extends State<HistoryScreen> {
 
   void _refreshTests() {
     setState(() {
-      _testsFuture = DatabaseHelper.instance.readAllTests();
+      // Use the lightweight summary query — skips route_points and ai_report
+      // blobs that the list view never needs.
+      _testsFuture = DatabaseHelper.instance.readTestSummaries();
     });
   }
 
@@ -43,8 +45,13 @@ class _HistoryScreenState extends State<HistoryScreen> {
 
   Future<void> _showTestDetails(
       Map<String, dynamic> test, String testTitle) async {
+    // The list is populated from readTestSummaries() which omits route_points
+    // and ai_report. Fetch the full record now so the dialog has everything.
+    test =
+        await DatabaseHelper.instance.readTestById(test['id'] as int) ?? test;
+
     List<Map<String, dynamic>> anomalies =
-        await DatabaseHelper.instance.readAnomaliesForTest(test['id']);
+        await DatabaseHelper.instance.readAnomaliesForTest(test['id'] as int);
 
     List<LatLng> routePoints = [];
     if (test['route_points'] != null) {
@@ -69,198 +76,208 @@ class _HistoryScreenState extends State<HistoryScreen> {
             "${dt.year}-${dt.month.toString().padLeft(2, '0')}-${dt.day.toString().padLeft(2, '0')} ${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}";
 
         String? aiErrorMessage;
-        return StatefulBuilder(
-          builder: (context, setDialogState) {
-            return Dialog(
-              backgroundColor: Colors.transparent,
-              child: _GlassCard(
-                borderGlow: color.withOpacity(0.5),
-                child: Padding(
-                  padding: const EdgeInsets.all(24.0),
-                  child: SingleChildScrollView(
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Text(
-                      testTitle,
-                      style: const TextStyle(
-                          fontSize: 20,
-                          fontWeight: FontWeight.bold,
-                          color: Colors.white),
-                    ),
-                    const SizedBox(height: 16),
-                    Text(
-                      'RMS DEĞERİ: ${score.toStringAsFixed(3)} m/s²',
-                      style: TextStyle(
-                          fontSize: 24,
-                          fontWeight: FontWeight.w900,
-                          color: color),
-                    ),
-                    const SizedBox(height: 8),
-                    Text(label.toUpperCase(),
-                        style: TextStyle(
-                            color: color, fontWeight: FontWeight.bold)),
-                    const Divider(color: Colors.white24, height: 32),
-                    _buildDetailRow(
-                        Icons.calendar_today, 'Tarih', formattedDate),
-                    if (test['vehicle_info'] != null) ...[
-                      const SizedBox(height: 12),
-                      _buildDetailRow(
-                          Icons.directions_car, 'Araç', test['vehicle_info']),
-                    ],
-                    if (test['tire_info'] != null) ...[
-                      const SizedBox(height: 12),
-                      _buildDetailRow(
-                          Icons.settings, 'Lastik', test['tire_info']),
-                    ],
-                    if (test['phone_placement'] != null) ...[
-                      const SizedBox(height: 12),
-                      _buildDetailRow(Icons.smartphone_outlined,
-                          'Telefon Konumu', test['phone_placement']),
-                    ],
-                    if (test['anomaly_count'] != null &&
-                        test['anomaly_count'] > 0) ...[
-                      const SizedBox(height: 12),
-                      _buildDetailRow(
-                          Icons.warning_amber_rounded,
-                          'Tespit Edilen Anomali',
-                          '${test['anomaly_count']} Adet'),
-                    ],
-                    if (test['distance_km'] != null) ...[
-                      const SizedBox(height: 12),
-                      _buildDetailRow(Icons.route, 'Mesafe',
-                          '${test['distance_km']!.toStringAsFixed(2)} km'),
-                    ],
-                    if (test['duration_seconds'] != null) ...[
-                      const SizedBox(height: 12),
-                      _buildDetailRow(Icons.timer, 'Süre',
-                          '${test['duration_seconds']} sn'),
-                    ],
-                    const SizedBox(height: 12),
-                    _buildDetailRow(
-                        Icons.location_on,
-                        'Başlangıç Konumu',
-                        test['start_lat'] != null
-                            ? '${test['start_lat']!.toStringAsFixed(4)}, ${test['start_lng']!.toStringAsFixed(4)}'
-                            : 'Konum bulunamadı'),
-                    if (test['end_lat'] != null) ...[
-                      const SizedBox(height: 12),
-                      _buildDetailRow(Icons.flag, 'Bitiş Konumu',
-                          '${test['end_lat']!.toStringAsFixed(4)}, ${test['end_lng']!.toStringAsFixed(4)}'),
-                    ],
-                    const SizedBox(height: 24),
-                    if (routePoints.isNotEmpty) ...[
-                      SizedBox(
-                        height: 200,
-                        child: ClipRRect(
-                          borderRadius: BorderRadius.circular(12),
-                          child: FlutterMap(
-                            options: MapOptions(
-                              initialCenter: routePoints.first,
-                              initialZoom: 15.0,
-                              interactionOptions: const InteractionOptions(
-                                flags: InteractiveFlag.all,
-                              ),
-                            ),
-                            children: [
-                              TileLayer(
-                                urlTemplate:
-                                    'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
-                                userAgentPackageName: 'com.simay.konfor_olcer',
-                              ),
-                              PolylineLayer(
-                                polylines: [
-                                  Polyline(
-                                    points: routePoints,
-                                    color: Colors.blueAccent,
-                                    strokeWidth: 4.0,
-                                  ),
-                                ],
-                              ),
-                              MarkerLayer(
-                                markers: anomalies
-                                    .map((a) => Marker(
-                                          point: LatLng(a['lat'], a['lng']),
-                                          width: 30,
-                                          height: 30,
-                                          child: const Icon(Icons.location_on,
-                                              color: Colors.redAccent,
-                                              size: 30),
-                                        ))
-                                    .toList(),
-                              ),
-                            ],
-                          ),
-                        ),
-                      ),
-                      const SizedBox(height: 24),
-                    ],
-                    if (aiErrorMessage != null) ...[
-                      Container(
-                        padding: const EdgeInsets.all(12),
-                        decoration: BoxDecoration(
-                          color: Colors.redAccent.withOpacity(0.1),
-                          borderRadius: BorderRadius.circular(8),
-                          border: Border.all(color: Colors.redAccent.withOpacity(0.3)),
-                        ),
-                        child: Text(
-                          aiErrorMessage!,
-                          style: const TextStyle(color: Colors.redAccent, fontWeight: FontWeight.bold),
-                          textAlign: TextAlign.center,
-                        ),
+        return StatefulBuilder(builder: (context, setDialogState) {
+          return Dialog(
+            backgroundColor: Colors.transparent,
+            child: _GlassCard(
+              borderGlow: color.withOpacity(0.5),
+              child: Padding(
+                padding: const EdgeInsets.all(24.0),
+                child: SingleChildScrollView(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(
+                        testTitle,
+                        style: const TextStyle(
+                            fontSize: 20,
+                            fontWeight: FontWeight.bold,
+                            color: Colors.white),
                       ),
                       const SizedBox(height: 16),
-                    ],
-                    SizedBox(
-                      width: double.infinity,
-                      child: ElevatedButton.icon(
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: Colors.indigoAccent.withOpacity(0.2),
-                          foregroundColor: Colors.indigoAccent,
-                          padding: const EdgeInsets.symmetric(vertical: 12),
-                          shape: RoundedRectangleBorder(
-                              borderRadius: BorderRadius.circular(8),
-                              side: BorderSide(
-                                  color: Colors.indigoAccent.withOpacity(0.5))),
+                      Text(
+                        'RMS DEĞERİ: ${score.toStringAsFixed(3)} m/s²',
+                        style: TextStyle(
+                            fontSize: 24,
+                            fontWeight: FontWeight.w900,
+                            color: color),
+                      ),
+                      const SizedBox(height: 8),
+                      Text(label.toUpperCase(),
+                          style: TextStyle(
+                              color: color, fontWeight: FontWeight.bold)),
+                      const Divider(color: Colors.white24, height: 32),
+                      _buildDetailRow(
+                          Icons.calendar_today, 'Tarih', formattedDate),
+                      if (test['vehicle_info'] != null) ...[
+                        const SizedBox(height: 12),
+                        _buildDetailRow(
+                            Icons.directions_car, 'Araç', test['vehicle_info']),
+                      ],
+                      if (test['tire_info'] != null) ...[
+                        const SizedBox(height: 12),
+                        _buildDetailRow(
+                            Icons.settings, 'Lastik', test['tire_info']),
+                      ],
+                      if (test['phone_placement'] != null) ...[
+                        const SizedBox(height: 12),
+                        _buildDetailRow(Icons.smartphone_outlined,
+                            'Telefon Konumu', test['phone_placement']),
+                      ],
+                      if (test['anomaly_count'] != null &&
+                          test['anomaly_count'] > 0) ...[
+                        const SizedBox(height: 12),
+                        _buildDetailRow(
+                            Icons.warning_amber_rounded,
+                            'Tespit Edilen Anomali',
+                            '${test['anomaly_count']} Adet'),
+                      ],
+                      if (test['distance_km'] != null) ...[
+                        const SizedBox(height: 12),
+                        _buildDetailRow(Icons.route, 'Mesafe',
+                            '${test['distance_km']!.toStringAsFixed(2)} km'),
+                      ],
+                      if (test['duration_seconds'] != null) ...[
+                        const SizedBox(height: 12),
+                        _buildDetailRow(Icons.timer, 'Süre',
+                            '${test['duration_seconds']} sn'),
+                      ],
+                      const SizedBox(height: 12),
+                      _buildDetailRow(
+                          Icons.location_on,
+                          'Başlangıç Konumu',
+                          test['start_lat'] != null
+                              ? '${test['start_lat']!.toStringAsFixed(4)}, ${test['start_lng']!.toStringAsFixed(4)}'
+                              : 'Konum bulunamadı'),
+                      if (test['end_lat'] != null) ...[
+                        const SizedBox(height: 12),
+                        _buildDetailRow(Icons.flag, 'Bitiş Konumu',
+                            '${test['end_lat']!.toStringAsFixed(4)}, ${test['end_lng']!.toStringAsFixed(4)}'),
+                      ],
+                      const SizedBox(height: 24),
+                      if (routePoints.isNotEmpty) ...[
+                        SizedBox(
+                          height: 200,
+                          child: ClipRRect(
+                            borderRadius: BorderRadius.circular(12),
+                            child: FlutterMap(
+                              options: MapOptions(
+                                initialCenter: routePoints.first,
+                                initialZoom: 15.0,
+                                interactionOptions: const InteractionOptions(
+                                  flags: InteractiveFlag.all,
+                                ),
+                              ),
+                              children: [
+                                TileLayer(
+                                  urlTemplate:
+                                      'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+                                  userAgentPackageName:
+                                      'com.simay.konfor_olcer',
+                                ),
+                                PolylineLayer(
+                                  polylines: [
+                                    Polyline(
+                                      points: routePoints,
+                                      color: Colors.blueAccent,
+                                      strokeWidth: 4.0,
+                                    ),
+                                  ],
+                                ),
+                                MarkerLayer(
+                                  markers: anomalies
+                                      .map((a) => Marker(
+                                            point: LatLng(a['lat'], a['lng']),
+                                            width: 30,
+                                            height: 30,
+                                            child: const Icon(Icons.location_on,
+                                                color: Colors.redAccent,
+                                                size: 30),
+                                          ))
+                                      .toList(),
+                                ),
+                              ],
+                            ),
+                          ),
                         ),
-                        icon: const Icon(Icons.auto_awesome),
-                        label: const Text('🤖 YZ Analizi Raporu Al',
-                            style: TextStyle(fontWeight: FontWeight.bold)),
-                        onPressed: () async {
-                          setDialogState(() {
-                            aiErrorMessage = null;
-                          });
-                          try {
-                            await _generateAiReport(test);
-                          } catch (e) {
+                        const SizedBox(height: 24),
+                      ],
+                      if (aiErrorMessage != null) ...[
+                        Container(
+                          padding: const EdgeInsets.all(12),
+                          decoration: BoxDecoration(
+                            color: Colors.redAccent.withOpacity(0.1),
+                            borderRadius: BorderRadius.circular(8),
+                            border: Border.all(
+                                color: Colors.redAccent.withOpacity(0.3)),
+                          ),
+                          child: Text(
+                            aiErrorMessage!,
+                            style: const TextStyle(
+                                color: Colors.redAccent,
+                                fontWeight: FontWeight.bold),
+                            textAlign: TextAlign.center,
+                          ),
+                        ),
+                        const SizedBox(height: 16),
+                      ],
+                      SizedBox(
+                        width: double.infinity,
+                        child: ElevatedButton.icon(
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor:
+                                Colors.indigoAccent.withOpacity(0.2),
+                            foregroundColor: Colors.indigoAccent,
+                            padding: const EdgeInsets.symmetric(vertical: 12),
+                            shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(8),
+                                side: BorderSide(
+                                    color:
+                                        Colors.indigoAccent.withOpacity(0.5))),
+                          ),
+                          icon: const Icon(Icons.auto_awesome),
+                          label: const Text('🤖 YZ Analizi Raporu Al',
+                              style: TextStyle(fontWeight: FontWeight.bold)),
+                          onPressed: () async {
                             setDialogState(() {
-                              aiErrorMessage = e.toString().replaceAll('Exception: ', '');
+                              aiErrorMessage = null;
                             });
-                          }
-                        },
-                      ),
-                    ),
-                    const SizedBox(height: 12),
-                    SizedBox(
-                      width: double.infinity,
-                      child: ElevatedButton(
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: Colors.white10,
-                          foregroundColor: Colors.white,
-                          shape: RoundedRectangleBorder(
-                              borderRadius: BorderRadius.circular(8)),
+                            // FIX #8: Catch typed exceptions for user-friendly
+                            // messages, with a generic fallback for anything else.
+                            try {
+                              await _generateAiReport(test);
+                            } on AiQuotaException catch (e) {
+                              setDialogState(() => aiErrorMessage = e.message);
+                            } on AiServiceException catch (e) {
+                              setDialogState(() => aiErrorMessage = e.message);
+                            } catch (e) {
+                              setDialogState(() => aiErrorMessage =
+                                  e.toString().replaceAll('Exception: ', ''));
+                            }
+                          },
                         ),
-                        onPressed: () => Navigator.pop(context),
-                        child: const Text('KAPAT'),
                       ),
-                    )
-                  ],
+                      const SizedBox(height: 12),
+                      SizedBox(
+                        width: double.infinity,
+                        child: ElevatedButton(
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: Colors.white10,
+                            foregroundColor: Colors.white,
+                            shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(8)),
+                          ),
+                          onPressed: () => Navigator.pop(context),
+                          child: const Text('KAPAT'),
+                        ),
+                      )
+                    ],
+                  ),
                 ),
               ),
             ),
-          ),
-        );
-      });
+          );
+        });
       },
     );
   }
@@ -284,39 +301,31 @@ class _HistoryScreenState extends State<HistoryScreen> {
     );
 
     try {
-      final int sessionId = test['id'];
+      final int sessionId = test['id'] as int;
       List<Map<String, dynamic>> anomalies = [];
-      if (test['anomaly_count'] != null && test['anomaly_count'] > 0) {
+      if ((test['anomaly_count'] as int? ?? 0) > 0) {
         anomalies =
             await DatabaseHelper.instance.readAnomaliesForTest(sessionId);
       }
 
-      // API'ye istek at
+      // FIX #8: AiService now throws typed exceptions on failure.
+      // No sentinel-string inspection needed — a successful return is always
+      // a valid report.
       final String report =
           await AiService.generateRideAnalysis(test, anomalies);
 
-      if (context.mounted) {
-        Navigator.pop(context); // Yükleme animasyonunu kapat
+      if (!context.mounted) return;
+      Navigator.pop(context);
 
-        if (report.contains("KOTA AŞILDI")) {
-          throw Exception("KOTA AŞILDI: Google sunucularına çok fazla istek gönderildi. Lütfen yaklaşık 30 saniye bekleyip tekrar deneyin.");
-        } else if (report.startsWith("⚠️ **HATA**")) {
-          throw Exception("BEKLENMEYEN HATA: $report");
-        } else {
-          // --- İŞTE EKSİK OLAN SİHİRLİ KISIM BURASIYDI ---
-          // Rapor başarılıysa bunu veritabanına ve o anki test verisine yazıyoruz!
-          try {
-            await DatabaseHelper.instance.saveAiReport(test['id'], report);
-            test['ai_report'] = report;
-          } catch (e) {
-            debugPrint("Rapor veritabanına kaydedilemedi: $e");
-          }
-          // -----------------------------------------------
-
-          // Normal raporu göster
-          _showReportDialog(report);
-        }
+      // Persist so the next tap shows the cached report instantly.
+      try {
+        await DatabaseHelper.instance.saveAiReport(test['id'] as int, report);
+        test['ai_report'] = report;
+      } catch (e) {
+        debugPrint('Rapor veritabanına kaydedilemedi: $e');
       }
+
+      _showReportDialog(report);
     } catch (e) {
       if (context.mounted) {
         Navigator.pop(context);
@@ -430,6 +439,18 @@ class _HistoryScreenState extends State<HistoryScreen> {
       ),
     );
 
+    // ── FIX #4: Batch-fetch ALL anomalies in one SQL round-trip ────────────
+    // Previously this was N queries — one readAnomaliesForTest() per test
+    // inside the loop. Now we collect all session IDs up front and issue a
+    // single WHERE session_id IN (...) query, then do O(1) map lookups below.
+    final List<int> idsWithAnomalies = tests
+        .where((t) => (t['anomaly_count'] as int? ?? 0) > 0)
+        .map((t) => t['id'] as int)
+        .toList();
+    final Map<int, List<Map<String, dynamic>>> anomaliesMap =
+        await DatabaseHelper.instance.readAnomaliesForTests(idsWithAnomalies);
+    // ────────────────────────────────────────────────────────────────────────
+
     List<List<dynamic>> rows = [];
     rows.add([
       "Test",
@@ -440,6 +461,8 @@ class _HistoryScreenState extends State<HistoryScreen> {
       "Telefon Konumu",
       "Mesafe (km)",
       "Süre (sn)",
+      "Ortalama Hız (km/s)",
+      "Hız Sapması",
       "Bas. Enlem",
       "Bas. Boylam",
       "Bitis Enlem",
@@ -450,9 +473,9 @@ class _HistoryScreenState extends State<HistoryScreen> {
     ]);
 
     for (var test in tests) {
-      final double score = test['score'];
+      final double score = (test['score'] as num).toDouble();
       final (label, _) = _getComfortLabel(score);
-      final DateTime dt = DateTime.parse(test['timestamp']);
+      final DateTime dt = DateTime.parse(test['timestamp'] as String);
       final String formattedDate = "${dt.month}/${dt.day}/${dt.year}";
       final String formattedTime =
           "${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}";
@@ -464,34 +487,35 @@ class _HistoryScreenState extends State<HistoryScreen> {
         test['vehicle_info'] ?? 'N/A',
         test['tire_info'] ?? 'N/A',
         test['phone_placement'] ?? 'N/A',
-        test['distance_km']?.toStringAsFixed(3) ?? 'N/A',
+        (test['distance_km'] as num?)?.toStringAsFixed(3) ?? 'N/A',
         test['duration_seconds']?.toString() ?? 'N/A',
-        test['start_lat']?.toStringAsFixed(5) ??
-            test['latitude']?.toStringAsFixed(5) ??
-            'N/A', // Fallback for V1
-        test['start_lng']?.toStringAsFixed(5) ??
-            test['longitude']?.toStringAsFixed(5) ??
+        (test['average_speed'] as num?)?.toStringAsFixed(2) ?? 'N/A',
+        (test['speed_deviation'] as num?)?.toStringAsFixed(2) ?? 'N/A',
+        (test['start_lat'] as num?)?.toStringAsFixed(5) ??
+            (test['latitude'] as num?)?.toStringAsFixed(5) ??
             'N/A',
-        test['end_lat']?.toStringAsFixed(5) ?? 'N/A',
-        test['end_lng']?.toStringAsFixed(5) ?? 'N/A',
+        (test['start_lng'] as num?)?.toStringAsFixed(5) ??
+            (test['longitude'] as num?)?.toStringAsFixed(5) ??
+            'N/A',
+        (test['end_lat'] as num?)?.toStringAsFixed(5) ?? 'N/A',
+        (test['end_lng'] as num?)?.toStringAsFixed(5) ?? 'N/A',
         score.toStringAsFixed(4),
         label,
-        test['anomaly_count']?.toString() ?? '0'
+        test['anomaly_count']?.toString() ?? '0',
       ]);
 
-      if (test['anomaly_count'] != null && test['anomaly_count'] > 0) {
+      // O(1) lookup — no extra DB call per test.
+      final List<Map<String, dynamic>> anomalies =
+          anomaliesMap[test['id'] as int] ?? [];
+      if (anomalies.isNotEmpty) {
         rows.add(["-> GÜZERGAH ANOMALİLERİ (ALT LİSTE)"]);
         rows.add(["Anomaly_Lat", "Anomaly_Lng", "Peak_Score", "Timestamp"]);
-
-        final int sessionId = test['id'];
-        final anomalies =
-            await DatabaseHelper.instance.readAnomaliesForTest(sessionId);
         for (var a in anomalies) {
           rows.add([
-            a['lat']?.toStringAsFixed(5) ?? 'N/A',
-            a['lng']?.toStringAsFixed(5) ?? 'N/A',
+            (a['lat'] as num?)?.toStringAsFixed(5) ?? 'N/A',
+            (a['lng'] as num?)?.toStringAsFixed(5) ?? 'N/A',
             (a['peak_score'] as double?)?.toStringAsFixed(4) ?? 'N/A',
-            a['timestamp'] ?? 'N/A'
+            a['timestamp'] ?? 'N/A',
           ]);
         }
         rows.add([]);
@@ -531,7 +555,9 @@ class _HistoryScreenState extends State<HistoryScreen> {
           IconButton(
             icon: const Icon(Icons.file_download, color: Colors.blueGrey),
             onPressed: () async {
-              final tests = await _testsFuture;
+              // Fetch full records (with route_points etc.) for export,
+              // not the lightweight summaries used by the list view.
+              final tests = await DatabaseHelper.instance.readAllTests();
               if (tests.isNotEmpty) {
                 await _exportToCsv(tests);
               }
@@ -608,7 +634,14 @@ class _HistoryScreenState extends State<HistoryScreen> {
                             color: Colors.white, size: 32),
                       ),
                       onDismissed: (direction) async {
-                        await DatabaseHelper.instance.deleteTest(test['id']);
+                        // Back up the full record BEFORE deleting so the undo
+                        // action can restore route_points and ai_report too,
+                        // which aren't present in the list summary.
+                        final Map<String, dynamic>? fullRecord =
+                            await DatabaseHelper.instance
+                                .readTestById(test['id'] as int);
+                        await DatabaseHelper.instance
+                            .deleteTest(test['id'] as int);
                         _refreshTests();
 
                         if (context.mounted) {
@@ -626,8 +659,17 @@ class _HistoryScreenState extends State<HistoryScreen> {
                                 label: 'GERİ AL',
                                 textColor: Colors.white,
                                 onPressed: () async {
+                                  // Restore from the full record so no data
+                                  // (route_points, ai_report) is lost. Strip
+                                  // 'id' so SQLite assigns a fresh AUTOINCREMENT
+                                  // value — avoids PK conflicts with records
+                                  // added after the delete.
+                                  final source = fullRecord ?? test;
+                                  final restored =
+                                      Map<String, dynamic>.from(source)
+                                        ..remove('id');
                                   await DatabaseHelper.instance
-                                      .insertTest(test);
+                                      .insertTest(restored);
                                   _refreshTests();
                                 },
                               ),
@@ -688,7 +730,14 @@ class _HistoryScreenState extends State<HistoryScreen> {
                                 IconButton(
                                   icon: const Icon(Icons.share,
                                       color: Colors.blueGrey, size: 20),
-                                  onPressed: () => _exportToCsv([test]),
+                                  onPressed: () async {
+                                    // The list item is a summary; fetch the
+                                    // full record so the CSV includes all cols.
+                                    final full = await DatabaseHelper.instance
+                                        .readTestById(test['id'] as int);
+                                    if (full != null)
+                                      await _exportToCsv([full]);
+                                  },
                                 ),
                               ],
                             ),

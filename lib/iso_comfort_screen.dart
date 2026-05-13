@@ -1,9 +1,11 @@
 import 'dart:async';
+import 'dart:collection'; // NEW: Queue for O(1) sliding-window front-removal
 import 'dart:math';
 import 'dart:ui';
 import 'dart:io';
 import 'dart:convert';
 
+import 'package:flutter/foundation.dart'; // NEW: compute() for background isolate
 import 'package:flutter/material.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
@@ -18,6 +20,300 @@ import 'package:latlong2/latlong.dart';
 import 'database_helper.dart';
 import 'history_screen.dart';
 
+// ═══════════════════════════════════════════════════════════════════════════
+// TOP-LEVEL SECTION — ISO 2631-1 CONSTANTS, HELPERS & COMPUTE ENTRY POINT
+//
+// Everything in this section must live OUTSIDE any class so that Flutter's
+// compute() helper can dispatch _computeRmsBlock() to a background Isolate
+// without capturing instance state (which would cause a serialisation error).
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// ISO 2631-1 one-third octave band centre frequencies (Hz).
+const List<double> _kIsoFreqs = [
+  0.1,
+  0.125,
+  0.16,
+  0.2,
+  0.25,
+  0.315,
+  0.4,
+  0.5,
+  0.63,
+  0.8,
+  1.0,
+  1.25,
+  1.6,
+  2.0,
+  2.5,
+  3.15,
+  4.0,
+  5.0,
+  6.3,
+  8.0,
+  10.0,
+  12.5,
+  16.0,
+  20.0,
+  25.0,
+  31.5,
+  40.0,
+  50.0,
+  63.0,
+  80.0,
+  100.0,
+  125.0,
+  160.0,
+  200.0,
+  250.0,
+  315.0,
+  400.0,
+];
+
+/// Wk weighting factors — vertical Z axis (ISO 2631-1 Table A.2).
+const List<double> _kWkRaw = [
+  0.0312,
+  0.0486,
+  0.079,
+  0.121,
+  0.182,
+  0.263,
+  0.352,
+  0.418,
+  0.459,
+  0.477,
+  0.482,
+  0.484,
+  0.494,
+  0.531,
+  0.631,
+  0.804,
+  0.967,
+  1.039,
+  1.054,
+  1.036,
+  0.988,
+  0.902,
+  0.768,
+  0.636,
+  0.513,
+  0.405,
+  0.314,
+  0.246,
+  0.186,
+  0.132,
+  0.0887,
+  0.054,
+  0.0285,
+  0.0152,
+  0.0079,
+  0.00398,
+  0.00195,
+];
+
+/// Wd weighting factors — horizontal X/Y axes (ISO 2631-1 Table A.2).
+const List<double> _kWdRaw = [
+  0.0624,
+  0.0973,
+  0.158,
+  0.243,
+  0.365,
+  0.530,
+  0.713,
+  0.853,
+  0.944,
+  0.992,
+  1.011,
+  1.008,
+  0.968,
+  0.890,
+  0.776,
+  0.642,
+  0.512,
+  0.409,
+  0.323,
+  0.253,
+  0.212,
+  0.161,
+  0.125,
+  0.100,
+  0.080,
+  0.0632,
+  0.0494,
+  0.0388,
+  0.0295,
+  0.0211,
+  0.0141,
+  0.00863,
+  0.00455,
+  0.00243,
+  0.00126,
+  0.00064,
+  0.00031,
+];
+
+/// Equivalent of numpy.interp — piecewise linear interpolation on sorted
+/// (xp, fp) pairs. Clamps at the boundary values outside [xp.first, xp.last].
+double _interpIso(double x, List<double> xp, List<double> fp) {
+  if (x <= xp.first) return fp.first;
+  if (x >= xp.last) return fp.last;
+  for (int i = 0; i < xp.length - 1; i++) {
+    if (x >= xp[i] && x <= xp[i + 1]) {
+      final double t = (x - xp[i]) / (xp[i + 1] - xp[i]);
+      return fp[i] + t * (fp[i + 1] - fp[i]);
+    }
+  }
+  return 0.0;
+}
+
+/// Returns the Wd weighting coefficient for frequency [f] (horizontal axes).
+double _getWdWeight(double f) => _interpIso(f, _kIsoFreqs, _kWdRaw);
+
+/// Returns the Wk weighting coefficient for frequency [f] (vertical axis).
+double _getWkWeight(double f) => _interpIso(f, _kIsoFreqs, _kWkRaw);
+
+/// ─────────────────────────────────────────────────────────────────────────
+/// Entry point for Flutter's [compute] helper.
+///
+/// Receives a plain [Map] (safe to copy across the isolate boundary) and
+/// returns a plain [Map] with the computed results.
+///
+/// INPUT keys:
+///   bufX / bufY / bufZ  — List<double> snapshots of the 512-sample window
+///   timeBuf             — List<double> elapsed-time stamps (seconds)
+///   N                   — FFT window size (int, currently 512)
+///   testElapsedMs       — milliseconds elapsed since test start (double)
+///   needsValidation     — bool; true only for the very first FFT block
+///
+/// OUTPUT keys:
+///   finalBlockAv   — double  Overall Vibration Value (OVV) for this block
+///   fftCsvRows     — List<String>  FFT rows ready for direct IOSink writes
+///   isAnomaly      — bool    true when finalBlockAv > 1.25 m/s²
+///   validationRows — List<String>  non-empty only when needsValidation=true
+/// ─────────────────────────────────────────────────────────────────────────
+Map<String, dynamic> _computeRmsBlock(Map<String, dynamic> params) {
+  final List<double> bufX = List<double>.from(params['bufX'] as List);
+  final List<double> bufY = List<double>.from(params['bufY'] as List);
+  final List<double> bufZ = List<double>.from(params['bufZ'] as List);
+  final List<double> timeBuf = List<double>.from(params['timeBuf'] as List);
+  final int N = params['N'] as int;
+  final double testElapsedMs = (params['testElapsedMs'] as num).toDouble();
+  final bool needsValidation = params['needsValidation'] as bool;
+
+  // ── 1. DC REMOVAL (zero-mean / detrending) ────────────────────────────
+  // Computed on a temporary copy so the original snapshot is preserved for
+  // validation CSV output below.
+  final double meanX = bufX.reduce((a, b) => a + b) / N;
+  final double meanY = bufY.reduce((a, b) => a + b) / N;
+  final double meanZ = bufZ.reduce((a, b) => a + b) / N;
+
+  final List<double> detX = bufX.map((e) => e - meanX).toList();
+  final List<double> detY = bufY.map((e) => e - meanY).toList();
+  final List<double> detZ = bufZ.map((e) => e - meanZ).toList();
+
+  // ── 2. HAMMING WINDOW with amplitude correction factor 1.852 ──────────
+  // The Hamming window's Coherent Gain ≈ 0.54, so we multiply by 1/0.54
+  // ≈ 1.852 to restore the physical amplitude of the signal.
+  final List<double> winX = List.generate(
+      N, (i) => detX[i] * (0.54 - 0.46 * cos(2 * pi * i / (N - 1))) * 1.852);
+  final List<double> winY = List.generate(
+      N, (i) => detY[i] * (0.54 - 0.46 * cos(2 * pi * i / (N - 1))) * 1.852);
+  final List<double> winZ = List.generate(
+      N, (i) => detZ[i] * (0.54 - 0.46 * cos(2 * pi * i / (N - 1))) * 1.852);
+
+  // ── 3. FFT ─────────────────────────────────────────────────────────────
+  final fft = FFT(N);
+  final resX = fft.realFft(winX);
+  final resY = fft.realFft(winY);
+  final resZ = fft.realFft(winZ);
+
+  // ── 4. ISO WEIGHTING + PARSEVAL RMS ACCUMULATION ──────────────────────
+  // Real-spectrum df is derived from the actual measured sampling rate so
+  // that clock drift on the device is automatically corrected.
+  final double totalTime = timeBuf.last - timeBuf.first;
+  final double realFs = (N - 1) / totalTime;
+  final double df = realFs / N;
+
+  double sumSqX = 0, sumSqY = 0, sumSqZ = 0;
+  final List<String> fftCsvRows = [];
+  final double timeSec = testElapsedMs / 1000.0;
+
+  // Only the positive-frequency bins (Nyquist: 1 … N/2-1).
+  for (int i = 1; i < N ~/ 2; i++) {
+    final double f = i * df;
+
+    // Complex magnitude → physical amplitude (m/s²) via normalisation.
+    final double magX = sqrt(resX[i].x * resX[i].x + resX[i].y * resX[i].y);
+    final double magY = sqrt(resY[i].x * resY[i].x + resY[i].y * resY[i].y);
+    final double magZ = sqrt(resZ[i].x * resZ[i].x + resZ[i].y * resZ[i].y);
+    final double ampX = magX / (N / 2);
+    final double ampY = magY / (N / 2);
+    final double ampZ = magZ / (N / 2);
+
+    // Build CSV row; bin i=1 carries the block timestamp.
+    if (i == 1) {
+      fftCsvRows.add(
+          "${timeSec.toStringAsFixed(3)};;;;${f.toStringAsFixed(2)};${ampX.toStringAsFixed(4)};${ampY.toStringAsFixed(4)};${ampZ.toStringAsFixed(4)}");
+    } else {
+      fftCsvRows.add(
+          ";;;;${f.toStringAsFixed(2)};${ampX.toStringAsFixed(4)};${ampY.toStringAsFixed(4)};${ampZ.toStringAsFixed(4)}");
+    }
+
+    // ISO 2631-1 frequency weighting.
+    final double wd = _getWdWeight(f);
+    final double wk = _getWkWeight(f);
+    final double wX = ampX * wd;
+    final double wY = ampY * wd;
+    final double wZ = ampZ * wk;
+
+    // Parseval's theorem: power = (amplitude²) / 2 for single-sided spectrum.
+    sumSqX += (wX * wX) / 2.0;
+    sumSqY += (wY * wY) / 2.0;
+    sumSqZ += (wZ * wZ) / 2.0;
+  }
+
+  // Per-axis RMS → three-axis OVV (Overall Vibration Value).
+  final double rmsX = sqrt(sumSqX);
+  final double rmsY = sqrt(sumSqY);
+  final double rmsZ = sqrt(sumSqZ);
+  final double finalBlockAv = sqrt(rmsX * rmsX + rmsY * rmsY + rmsZ * rmsZ);
+
+  // ── 5. VALIDATION ROWS — first block only, for MATLAB export ──────────
+  final List<String> validationRows = [];
+  if (needsValidation) {
+    const double realFsV = 50.0;
+    final double dfV = realFsV / N;
+    validationRows
+        .add("Zaman_s;Ivme_X;Ivme_Y;Ivme_Z;Frekans_Hz;FFT_X;FFT_Y;FFT_Z");
+    for (int i = 0; i < N; i++) {
+      final String tStr = (i * (1.0 / realFsV)).toStringAsFixed(3);
+      final String rawX = bufX[i].toStringAsFixed(4);
+      final String rawY = bufY[i].toStringAsFixed(4);
+      final String rawZ = bufZ[i].toStringAsFixed(4);
+      if (i < N ~/ 2) {
+        final double f = i * dfV;
+        final double mX = sqrt(resX[i].x * resX[i].x + resX[i].y * resX[i].y);
+        final double mY = sqrt(resY[i].x * resY[i].x + resY[i].y * resY[i].y);
+        final double mZ = sqrt(resZ[i].x * resZ[i].x + resZ[i].y * resZ[i].y);
+        validationRows.add(
+            "$tStr;$rawX;$rawY;$rawZ;${f.toStringAsFixed(2)};${(mX / (N / 2)).toStringAsFixed(4)};${(mY / (N / 2)).toStringAsFixed(4)};${(mZ / (N / 2)).toStringAsFixed(4)}");
+      } else {
+        validationRows.add("$tStr;$rawX;$rawY;$rawZ;;;;");
+      }
+    }
+  }
+
+  return {
+    'finalBlockAv': finalBlockAv,
+    'fftCsvRows': fftCsvRows,
+    'isAnomaly': finalBlockAv > 1.25,
+    'validationRows': validationRows,
+  };
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// WIDGET
+// ═══════════════════════════════════════════════════════════════════════════
+
 class IsoComfortScreen extends StatefulWidget {
   const IsoComfortScreen({super.key});
 
@@ -28,53 +324,62 @@ class IsoComfortScreen extends StatefulWidget {
 class _IsoComfortScreenState extends State<IsoComfortScreen>
     with SingleTickerProviderStateMixin {
   StreamSubscription<AccelerometerEvent>? _accelerometerSubscription;
-  //makinecilerin depolama listesi
-  final List<String> _machineDataRows = [];
+
+  // Validation rows (bounded: first FFT block only, ≤ 769 strings).
   final List<String> _validationRows = [];
+
   bool _isRunning = false;
 
-//FFT'nin calısması icin gereken veri boyutu
+  /// Guards against dispatching a new isolate before the previous one returns.
+  /// Without this, rapid ticks could stack multiple concurrent compute() calls.
+  bool _isProcessingFft = false;
+
   static const int _fftWindowSize = 512;
   static const double _samplingRate = 50.0;
-//depolama bufferları
-  final List<double> _bufferX = [];
-  final List<double> _bufferY = [];
-  final List<double> _bufferZ = [];
-  final List<double> _timeBuffer = [];
+
+  // ── CHANGE 1: Queue<double> replaces List<double> ──────────────────────
+  // Queue.removeFirst() / addLast() are O(1) vs List.removeAt(0) which is
+  // O(n). At 50 Hz with a 512-element window that was 76 800 element copies
+  // per second — now it's zero.
+  final Queue<double> _bufferX = Queue();
+  final Queue<double> _bufferY = Queue();
+  final Queue<double> _bufferZ = Queue();
+  final Queue<double> _timeBuffer = Queue();
 
   int _tickCount = 0;
   double _timeCounterChart = 0;
   final List<FlSpot> _chartData = [];
   static const int _maxDataPoints = 60;
-// rms skorlarını tutan liste
+
+  // Session-level RMS scores — one entry per ~1 s FFT block.
   final List<double> _sessionRmsScores = [];
 
   double? _gravityX;
   double? _gravityY;
   double? _gravityZ;
-  //Telefonun yerçekimini saf sarsıntıdan ayırmak için kullanılır.
   static const double _alpha = 0.1;
 
   double? _finalRmsAv;
   Position? _currentPosition;
 
   StreamSubscription<Position>? _positionSubscription;
-  //GPS koordinatlarını tutan liste
   final List<LatLng> _routeMap = [];
   double _totalDistanceKm = 0.0;
   DateTime? _testStartTime;
   int _durationSeconds = 0;
 
   DateTime? _lastAnomalyTime;
-  //anomali verilerini tutan liste
   final List<Map<String, dynamic>> _sessionAnomalies = [];
 
-  // Hız ve Sapma Değişkenleri
   double _currentSpeedKmh = 0.0;
   double _averageSpeedKmh = 0.0;
-  double _speedDeviation = 0.0; // Standart Sapma (+/-)
-  final List<double> _speedHistory =
-      []; // Sapmayı hesaplamak için tüm hızları burada biriktireceğiz
+  double _speedDeviation = 0.0;
+  final List<double> _speedHistory = [];
+
+  // ── CHANGE 2: IOSink replaces unbounded List<String> _machineDataRows ──
+  // Rows are streamed directly to disk as they arrive, so RAM usage stays
+  // flat regardless of session length.
+  IOSink? _csvSink;
 
   final TextEditingController _vehicleInfoController = TextEditingController();
   final TextEditingController _tireInfoController = TextEditingController();
@@ -100,6 +405,8 @@ class _IsoComfortScreenState extends State<IsoComfortScreen>
     _pulseController.dispose();
     _accelerometerSubscription?.cancel();
     _positionSubscription?.cancel();
+    // Safety net: close the sink if the widget is disposed mid-test.
+    _csvSink?.close();
     super.dispose();
   }
 
@@ -261,7 +568,7 @@ class _IsoComfortScreenState extends State<IsoComfortScreen>
                                   _selectedPhonePlacement = tempPlacement;
                                 });
                                 Navigator.pop(context);
-                                _startTest();
+                                _startTest(); // async; fire-and-forget is fine here
                               },
                               child: const Text('ONAYLA',
                                   style:
@@ -281,51 +588,58 @@ class _IsoComfortScreenState extends State<IsoComfortScreen>
     );
   }
 
-  void _startTest() {
+  // ── CHANGE 2: async so we can await getTemporaryDirectory() and open
+  // the IOSink BEFORE the accelerometer subscription starts writing to it.
+  // Everything before the first `await` still runs synchronously (including
+  // the setState that flips _isRunning = true), so the UI updates instantly.
+  Future<void> _startTest() async {
     HapticFeedback.lightImpact();
     setState(() {
       _isRunning = true;
+      _isProcessingFft = false;
       _finalRmsAv = null;
       _chartData.clear();
-      // Sinyal işleme (FFT) sepetlerini tamamen boşalt.
       _bufferX.clear();
       _bufferY.clear();
       _bufferZ.clear();
       _timeBuffer.clear();
       _sessionRmsScores.clear();
+      _validationRows.clear();
       _timeCounterChart = 0;
       _tickCount = 0;
-// Yerçekimi filtresini ve konumu sıfırla.
       _gravityX = null;
       _gravityY = null;
       _gravityZ = null;
       _currentPosition = null;
-
       _routeMap.clear();
       _totalDistanceKm = 0.0;
-      _testStartTime = DateTime.now(); //Kronometreyi tam şu an başlat.
+      _testStartTime = DateTime.now();
       _durationSeconds = 0;
-
       _lastAnomalyTime = null;
       _sessionAnomalies.clear();
-
       _currentSpeedKmh = 0.0;
       _averageSpeedKmh = 0.0;
       _speedDeviation = 0.0;
       _speedHistory.clear();
-
-      _machineDataRows.clear();
-      _machineDataRows
-          .add("Zaman_s;Ivme_X;Ivme_Y;Ivme_Z;Frekans_Hz;FFT_X;FFT_Y;FFT_Z");
     });
-//Arka planda konum takip motorunu çalıştırır.
+
+    // Open the streaming CSV file. The await here is negligible in practice
+    // (typically < 1 ms) but guarantees the sink is ready before the first
+    // accelerometer sample is written.
+    final directory = await getTemporaryDirectory();
+    final int ts = _testStartTime!.millisecondsSinceEpoch;
+    _csvSink = File('${directory.path}/machine_data_$ts.csv').openWrite();
+    _csvSink!
+        .writeln("Zaman_s;Ivme_X;Ivme_Y;Ivme_Z;Frekans_Hz;FFT_X;FFT_Y;FFT_Z");
+
     _fetchLocationAndStartStream();
 
     _accelerometerSubscription = accelerometerEventStream(
       samplingPeriod: const Duration(milliseconds: 20),
     ).listen((event) {
       if (!_isRunning) return;
-// Telefonun durduğu yerdeki 9.81 m/s² olan sabit yerçekimini buluruz (_alpha = 0.1).
+
+      // Low-pass filter to track the static gravity component (alpha = 0.1).
       _gravityX = _gravityX == null
           ? event.x
           : _alpha * event.x + (1 - _alpha) * _gravityX!;
@@ -335,227 +649,251 @@ class _IsoComfortScreenState extends State<IsoComfortScreen>
       _gravityZ = _gravityZ == null
           ? event.z
           : _alpha * event.z + (1 - _alpha) * _gravityZ!;
-      // Gelen anlık veriden, tespit ettiğimiz bu yerçekimini çıkartırız.
-      // dx, dy, dz: Artık elimizde sadece aracın hareketiyle oluşan SAF SARSINTI var.
+
+      // Pure vibration = raw reading minus the estimated gravity vector.
       final double dx = event.x - _gravityX!;
       final double dy = event.y - _gravityY!;
       final double dz = event.z - _gravityZ!;
-      //Testin başından beri kaç saniye geçti?
-      double elapsedSeconds = (DateTime.now().millisecondsSinceEpoch -
+
+      final double elapsedSeconds = (DateTime.now().millisecondsSinceEpoch -
               _testStartTime!.millisecondsSinceEpoch) /
           1000.0;
-      String time = elapsedSeconds.toStringAsFixed(3);
+      final String time = elapsedSeconds.toStringAsFixed(3);
 
-      _machineDataRows.add(
+      // ── CHANGE 2: write raw row directly to disk — no in-memory list ───
+      _csvSink?.writeln(
           "$time;${dx.toStringAsFixed(4)};${dy.toStringAsFixed(4)};${dz.toStringAsFixed(4)};;;;;");
-//// Gelen verileri FFT'de kullanmak üzere hafıza listelerine atıyoruz.
-      _timeBuffer.add(elapsedSeconds);
-      _bufferX.add(dx);
-      _bufferY.add(dy);
-      _bufferZ.add(dz);
-      _tickCount++; //// Sepete giren yeni veri sayısını tutar.
 
-      // Sepetimizin maksimum kapasitesi _fftWindowSize (512).
-      // Kapasite dolarsa, sepetin dibindeki en eski 1. veriyi (index 0) çöpe atıyoruz.
-      // Böylece elimizde her zaman en güncel 512 verilik bir paket kalıyor.
+      // ── CHANGE 1: O(1) Queue operations ────────────────────────────────
+      _timeBuffer.addLast(elapsedSeconds);
+      _bufferX.addLast(dx);
+      _bufferY.addLast(dy);
+      _bufferZ.addLast(dz);
+      _tickCount++;
+
+      // Keep the sliding window at exactly _fftWindowSize elements.
       if (_bufferX.length > _fftWindowSize) {
-        _bufferX.removeAt(0);
-        _bufferY.removeAt(0);
-        _bufferZ.removeAt(0);
-        _timeBuffer.removeAt(0);
+        _bufferX.removeFirst();
+        _bufferY.removeFirst();
+        _bufferZ.removeFirst();
+        _timeBuffer.removeFirst();
       }
-      // Eğer sepet tam kapasiteye (512) ulaştıysa VE içeriye tam 1 saniyelik (50 adet) YENİ veri girdiyse...
-      if (_bufferX.length == _fftWindowSize && _tickCount >= 50) {
-        _tickCount = 0; // Sayacı sıfırla.
-        _calculateBlockRms(); // Konfor skorunu hesapla, grafiği çizdir
+
+      // ── CHANGE 3: _isProcessingFft guard prevents stacked isolate calls ─
+      if (_bufferX.length == _fftWindowSize &&
+          _tickCount >= 50 &&
+          !_isProcessingFft) {
+        _tickCount = 0;
+        _triggerBlockRms(); // async; intentionally not awaited here
       }
     });
   }
 
-  void _calculateBlockRms() {
-    double totalTime = _timeBuffer.last - _timeBuffer.first;
-    // N-1 verinin geliş süresine bakarak o anki 'Gerçek Frekansı (Hz)' hesaplıyoruz.
-    double realFs = (_fftWindowSize - 1) / totalTime;
-    //FFT sonucunda her bir adımın kaç Hz'e denk geldiğini buluyoruz
-    final double df = realFs / _fftWindowSize;
+  // ── CHANGE 3: FFT pipeline now runs on a background isolate ─────────────
+  // Calling compute() keeps the main thread free for UI rendering while the
+  // 512-point FFT + 256 weighted accumulations happen in parallel.
+  Future<void> _triggerBlockRms() async {
+    _isProcessingFft = true;
 
-    // --- 1. DC COMPONENT TEMİZLİĞİ (ZERO-MEAN / DETRENDING) ---
-    double meanX = _bufferX.reduce((a, b) => a + b) / _fftWindowSize;
-    double meanY = _bufferY.reduce((a, b) => a + b) / _fftWindowSize;
-    double meanZ = _bufferZ.reduce((a, b) => a + b) / _fftWindowSize;
+    final double testElapsedMs = (DateTime.now().millisecondsSinceEpoch -
+            _testStartTime!.millisecondsSinceEpoch)
+        .toDouble();
 
-    // KRİTİK DÜZELTME: Orijinal buffer'ı BOZMADAN, hesaplama için geçici kopya listeler oluşturuyoruz.
-    // Böylece CSV'ye basılacak ham veri korunmuş oluyor ve Sliding Window mantığı bozulmuyor.
-    List<double> detrendedX = _bufferX.map((e) => e - meanX).toList();
-    List<double> detrendedY = _bufferY.map((e) => e - meanY).toList();
-    List<double> detrendedZ = _bufferZ.map((e) => e - meanZ).toList();
-    // ----------------------------------------------------------
+    // Snapshot the Queues into plain Lists before crossing the isolate
+    // boundary. toList() is O(n) but happens once per second — cheap.
+    final Map<String, dynamic> params = {
+      'bufX': _bufferX.toList(),
+      'bufY': _bufferY.toList(),
+      'bufZ': _bufferZ.toList(),
+      'timeBuf': _timeBuffer.toList(),
+      'N': _fftWindowSize,
+      'testElapsedMs': testElapsedMs,
+      'needsValidation': _validationRows.isEmpty,
+    };
 
-    // --- 2. WINDOWING (SİNYAL PÜRÜZSÜZLEŞTİRME) ---
-    // 1.852 Katsayısının Anlamı (Amplitude Correction Factor):
-    // Hanning/Hamming penceresi sinyalin kenarlarını sıfıra bastırırken toplam enerjiyi azaltır (Coherent Gain ~ 0.54).
-    // Sinyalin genliğini gerçek fiziksel seviyesine geri çekmek için (1 / 0.54 = 1.8518...) katsayısı ile çarpılır.
-    List<double> windowedX = List.generate(_fftWindowSize, (i) {
-      double w = (0.54 - 0.46 * cos(2 * pi * i / (_fftWindowSize - 1))) * 1.852;
-      return detrendedX[i] *
-          w; // Orijinal _bufferX yerine detrendedX kullanıldı
-    });
+    final Map<String, dynamic> result = await compute(_computeRmsBlock, params);
 
-    List<double> windowedY = List.generate(_fftWindowSize, (i) {
-      double w = (0.54 - 0.46 * cos(2 * pi * i / (_fftWindowSize - 1))) * 1.852;
-      return detrendedY[i] *
-          w; // Orijinal _bufferY yerine detrendedY kullanıldı
-    });
+    // Guard: the test may have been stopped while the isolate was running.
+    if (!_isRunning || !mounted) {
+      _isProcessingFft = false;
+      return;
+    }
 
-    List<double> windowedZ = List.generate(_fftWindowSize, (i) {
-      double w = (0.54 - 0.46 * cos(2 * pi * i / (_fftWindowSize - 1))) * 1.852;
-      return detrendedZ[i] *
-          w; // Orijinal _bufferZ yerine detrendedZ kullanıldı
-    });
+    final double finalBlockAv = (result['finalBlockAv'] as num).toDouble();
+    final List<String> fftRows = (result['fftCsvRows'] as List).cast<String>();
+    final bool isAnomaly = result['isAnomaly'] as bool;
+    final List<String> validRows =
+        (result['validationRows'] as List).cast<String>();
 
-    final fft = FFT(_fftWindowSize);
-    //saf frekansa ayrıştırma işlemi(çorba örneği)
-    final resX = fft.realFft(windowedX);
-    final resY = fft.realFft(windowedY);
-    final resZ = fft.realFft(windowedZ);
-//sarsıntıların şiddetini biriktirip olusturulan sepet
-    double sumSqX = 0;
-    double sumSqY = 0;
-    double sumSqZ = 0;
-// FFT'ninçıkardığı sonuçların ikinci yarısı, ilk yarısının aynısıdır (Buna Nyquist Teoremi denir)
-    for (int i = 1; i < _fftWindowSize ~/ 2; i++) {
-      //Bandın üzerinden o an geçen titreşimin frekansını (Hz) hesaplıyoruz
-      double f = i * df;
-      //sarsıntının gerçek "Büyüklüğünü (magX)" buluyoruz.(Dik kenarların karelerinin toplamının karekökü)
-      double magX = sqrt(resX[i].x * resX[i].x + resX[i].y * resX[i].y);
-      double magY = sqrt(resY[i].x * resY[i].x + resY[i].y * resY[i].y);
-      double magZ = sqrt(resZ[i].x * resZ[i].x + resZ[i].y * resZ[i].y);
+    // Write FFT rows to the open IOSink on the main thread.
+    for (final row in fftRows) {
+      _csvSink?.writeln(row);
+    }
 
-      // Gerçek fiziksel genliğe (m/s²) dönüştürme işlemi (Normalizasyon)
-      double ampX = magX / (_fftWindowSize / 2);
-      double ampY = magY / (_fftWindowSize / 2);
-      double ampZ = magZ / (_fftWindowSize / 2);
-      //makinecilerin verilerini csv ye yazdırma islemi
-      if (i == 1) {
-        double elapsedSeconds = (DateTime.now().millisecondsSinceEpoch -
-                _testStartTime!.millisecondsSinceEpoch) /
-            1000.0;
-        String time = elapsedSeconds.toStringAsFixed(3);
-        _machineDataRows.add(
-            "$time;;;;${f.toStringAsFixed(2)};${ampX.toStringAsFixed(4)};${ampY.toStringAsFixed(4)};${ampZ.toStringAsFixed(4)}");
-      } else {
-        _machineDataRows.add(
-            ";;;;${f.toStringAsFixed(2)};${ampX.toStringAsFixed(4)};${ampY.toStringAsFixed(4)};${ampZ.toStringAsFixed(4)}");
-      }
-      //insan hassasiyeti filtresi(karınca ornegi)-ıso 2631
-      // --- MAKİNE EKİBİ HASSAS KATSAYILARI İLE DOĞRU RMS HESAPLAMA ---
-      // 1. Hassas ISO katsayılarını çekiyoruz
-      double wd = _getWdWeighting(f);
-      double wk = _getWkWeighting(f);
+    // Capture the first-block validation snapshot for MATLAB export.
+    if (_validationRows.isEmpty && validRows.isNotEmpty) {
+      _validationRows.addAll(validRows);
+    }
 
-      // 2. Agirliklandirilmis_X = FFT_X * Wd
-      double weightedX = ampX * wd;
-      double weightedY = ampY * wd;
-      double weightedZ = ampZ * wk;
-
-      // 3. FİZİKTEKİ DOĞRU GÜÇ HESABI (PARSEVAL TEOREMİ)
-      // Senin eski kodunda olduğu gibi, toplamı nBins'e BÖLMÜYORUZ.
-      // Sadece (Genlik^2) / 2 formülüyle gerçek enerjiyi sepete atıyoruz.
-      sumSqX += (weightedX * weightedX) / 2.0;
-      sumSqY += (weightedY * weightedY) / 2.0;
-      sumSqZ += (weightedZ * weightedZ) / 2.0;
-    } // <-- FOR DÖNGÜSÜNÜN BİTİŞİ BURASI
-
-    // 4. Gerçek enerjiyi bulmak için doğrudan karekök alıyoruz (Bölme yok!)
-    double rmsX = sqrt(sumSqX);
-    double rmsY = sqrt(sumSqY);
-    double rmsZ = sqrt(sumSqZ);
-
-    // 5. Üç eksenin toplam bileşkesi (Bileşke RMS)
-    double finalBlockAv = sqrt(rmsX * rmsX + rmsY * rmsY + rmsZ * rmsZ);
-
-    if (finalBlockAv > 1.25) {
-      // Bu skor 1.25'ten büyük mü? Demek ki çok rahatsız edici bir çukura veya kasise girdik!" diyor.
+    // Haptic + anomaly geo-tagging requires GPS position — must be main thread.
+    if (isAnomaly) {
       if (finalBlockAv > 2.5) {
-        HapticFeedback.heavyImpact(); //guclu titresim veriyor.
+        HapticFeedback.heavyImpact();
       } else {
-        HapticFeedback.mediumImpact(); //orta derecede titresim veriyor.
+        HapticFeedback.mediumImpact();
       }
-
-      // 2. Anomaliyi Kaydetme (Database İçin)
-      final now = DateTime.now();
+      final DateTime now = DateTime.now();
       if (_lastAnomalyTime == null ||
-          //"Bir çukur tespit edip kaydettiysen, 2.5 saniye boyunca gözlerini kapat.
-          // Aynı çukurun yankılarını tekrar tekrar kaydetme.".
           now.difference(_lastAnomalyTime!).inMilliseconds > 2500) {
         _lastAnomalyTime = now;
-        //Test bitince haritada gördüğün o yuvarlak kırmızı uyarı işaretleri, tam olarak bu listedeki koordinatlara bakılarak çiziliyor
         if (_currentPosition != null) {
           _sessionAnomalies.add({
             'lat': _currentPosition!.latitude,
             'lng': _currentPosition!.longitude,
             'timestamp': now.toIso8601String(),
-            'peak_score': finalBlockAv
+            'peak_score': finalBlockAv,
           });
         }
       }
     }
-    // --- GEÇİCİ DOĞRULAMA CSV'Sİ DOLDURMA ALANI ---
-    if (_validationRows.isEmpty) {
-      // 1. Senin ve Makine ekibinin istediği yeni başlıklar:
-      _validationRows
-          .add("Zaman_s;Ivme_X;Ivme_Y;Ivme_Z;Frekans_Hz;FFT_X;FFT_Y;FFT_Z");
-
-      double realFs = 50.0; // Saniyedeki veri sayımız (50 Hz)
-      double df =
-          realFs / _fftWindowSize; // Her bir FFT adımının Frekans karşılığı
-
-      for (int i = 0; i < _fftWindowSize; i++) {
-        // İndeks yerine tam Zamanı (Saniye) hesaplıyoruz
-        double timeSec = i * (1.0 / realFs);
-        String t = timeSec.toStringAsFixed(3);
-
-        String rawX = _bufferX[i].toStringAsFixed(4);
-        String rawY = _bufferY[i].toStringAsFixed(4);
-        String rawZ = _bufferZ[i].toStringAsFixed(4);
-
-        if (i < _fftWindowSize ~/ 2) {
-          // Frekansı hesaplıyoruz (Hz)
-          double f = i * df;
-
-          double mX = sqrt(resX[i].x * resX[i].x + resX[i].y * resX[i].y);
-          double mY = sqrt(resY[i].x * resY[i].x + resY[i].y * resY[i].y);
-          double mZ = sqrt(resZ[i].x * resZ[i].x + resZ[i].y * resZ[i].y);
-
-          double aX = mX / (_fftWindowSize / 2);
-          double aY = mY / (_fftWindowSize / 2);
-          double aZ = mZ / (_fftWindowSize / 2);
-
-          // Frekans sütunu eklendi
-          _validationRows.add(
-              "$t;$rawX;$rawY;$rawZ;${f.toStringAsFixed(2)};${aX.toStringAsFixed(4)};${aY.toStringAsFixed(4)};${aZ.toStringAsFixed(4)}");
-        } else {
-          // FFT'nin olmadığı alt satırlarda frekans ve FFT sütunları boş bırakılıyor
-          _validationRows.add("$t;$rawX;$rawY;$rawZ;;;;");
-        }
-      }
-    }
-    // ----------------------------------------------
 
     setState(() {
       _sessionRmsScores.add(finalBlockAv);
       _finalRmsAv = finalBlockAv;
-
       _chartData.add(FlSpot(_timeCounterChart, finalBlockAv));
       _timeCounterChart += 1;
-
       if (_chartData.length > _maxDataPoints) {
         _chartData.removeAt(0);
       }
     });
+
+    _isProcessingFft = false;
   }
 
-  //uygulama konum ayarlaeını acıp acmadıgını kontrol ediyor sonrasında ise toplam kaç km gidildigini hesaplıyor
+  // ── CHANGE 2 cont.: async so we can flush/close the IOSink before the
+  // final score calculation reads session data.
+  Future<void> _stopTest() async {
+    if (!_isRunning) return;
+    HapticFeedback.lightImpact();
+
+    _accelerometerSubscription?.cancel();
+    _accelerometerSubscription = null;
+    _positionSubscription?.cancel();
+    _positionSubscription = null;
+
+    if (_testStartTime != null) {
+      _durationSeconds = DateTime.now().difference(_testStartTime!).inSeconds;
+    }
+
+    setState(() {
+      _isRunning = false;
+    });
+
+    // Flush any OS-buffered bytes and close the file handle before we
+    // compute the final trip score or export data.
+    await _csvSink?.flush();
+    await _csvSink?.close();
+    _csvSink = null;
+
+    _calculateSpeedStats();
+    _calculateIsoComfort();
+    _autoExportMachineData();
+  }
+
+  void _calculateSpeedStats() {
+    if (_speedHistory.isEmpty) return;
+    double sum = 0;
+    for (double speed in _speedHistory) {
+      sum += speed;
+    }
+    _averageSpeedKmh = sum / _speedHistory.length;
+
+    double varianceSum = 0;
+    for (double speed in _speedHistory) {
+      varianceSum += pow(speed - _averageSpeedKmh, 2);
+    }
+    _speedDeviation = sqrt(varianceSum / _speedHistory.length);
+  }
+
+  Future<void> _autoExportMachineData() async {
+    if (_validationRows.isEmpty) return;
+    try {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('⏳ Doğrulama verisi hazırlanıyor...')),
+        );
+      }
+      final directory = await getTemporaryDirectory();
+      final file = File('${directory.path}/FFT_Dogrulama_Verisi.csv');
+      await file.writeAsString(_validationRows.join('\n'));
+      await Share.shareXFiles([XFile(file.path)],
+          text: 'MATLAB Doğrulama Verisi (512 Ham vs 256 FFT)');
+    } catch (e) {
+      debugPrint("Auto-Export Error: $e");
+    }
+  }
+
+  Future<void> _calculateIsoComfort() async {
+    if (_sessionRmsScores.isEmpty) {
+      setState(() {
+        _finalRmsAv = 0.0;
+      });
+      return;
+    }
+
+    double sumSq = 0.0;
+    for (double av in _sessionRmsScores) {
+      sumSq += (av * av);
+    }
+    final double totalTripAv = sqrt(sumSq / _sessionRmsScores.length);
+
+    setState(() {
+      _finalRmsAv = totalTripAv;
+    });
+
+    final now = DateTime.now();
+    double? startLat, startLng, endLat, endLng;
+    if (_routeMap.isNotEmpty) {
+      startLat = _routeMap.first.latitude;
+      startLng = _routeMap.first.longitude;
+      endLat = _routeMap.last.latitude;
+      endLng = _routeMap.last.longitude;
+    }
+
+    final testData = {
+      'timestamp': now.toIso8601String(),
+      'score': _finalRmsAv,
+      'latitude': _currentPosition?.latitude,
+      'longitude': _currentPosition?.longitude,
+      'note': '',
+      'distance_km': _totalDistanceKm,
+      'duration_seconds': _durationSeconds,
+      'average_speed': _averageSpeedKmh,
+      'speed_deviation': _speedDeviation,
+      'start_lat': startLat,
+      'start_lng': startLng,
+      'end_lat': endLat,
+      'end_lng': endLng,
+      'anomaly_count': _sessionAnomalies.length,
+      'vehicle_info': _vehicleInfoController.text.trim().isEmpty
+          ? null
+          : _vehicleInfoController.text.trim(),
+      'tire_info': _tireInfoController.text.trim().isEmpty
+          ? null
+          : _tireInfoController.text.trim(),
+      'phone_placement': _selectedPhonePlacement,
+      'route_points': jsonEncode(_routeMap
+          .map((ll) => {'lat': ll.latitude, 'lng': ll.longitude})
+          .toList()),
+    };
+
+    final int newSessionId = await DatabaseHelper.instance.insertTest(testData);
+    for (var anomaly in _sessionAnomalies) {
+      anomaly['session_id'] = newSessionId;
+      await DatabaseHelper.instance.insertAnomaly(anomaly);
+    }
+  }
+
   Future<void> _fetchLocationAndStartStream() async {
     bool serviceEnabled;
     LocationPermission permission;
@@ -568,7 +906,6 @@ class _IsoComfortScreenState extends State<IsoComfortScreen>
       permission = await Geolocator.requestPermission();
       if (permission == LocationPermission.denied) return;
     }
-
     if (permission == LocationPermission.deniedForever) return;
 
     try {
@@ -593,19 +930,14 @@ class _IsoComfortScreenState extends State<IsoComfortScreen>
 
       final newPoint = LatLng(position.latitude, position.longitude);
 
-      // m/s cinsinden gelen hızı 3.6 ile çarparak km/h'ye çeviriyoruz.
-      // GPS bazen hata verip negatif hız döndürebilir, onu sıfıra eşitliyoruz.
       double currentSpeed = position.speed * 3.6;
       if (currentSpeed < 0) currentSpeed = 0.0;
 
       setState(() {
         _currentSpeedKmh = currentSpeed;
-
-        // Araç durmuyorsa (kırmızı ışıkta vb. beklemiyorsa) hızı listeye kaydet.
-        // Sıfırları listeye doldurmak ortalama hızı ve sapmayı bozar.
         if (currentSpeed > 2.0) {
           _speedHistory.add(currentSpeed);
-          _calculateSpeedStats(); // YENİ: Canlı güncellenmesi için buraya ekledik!
+          _calculateSpeedStats();
         }
       });
 
@@ -642,297 +974,6 @@ class _IsoComfortScreenState extends State<IsoComfortScreen>
         });
       }
     });
-  }
-
-  //FFT'den gelen her bir frekansı alır, hangi aralığa düştüğüne bakar ve
-  // o frekansın RMS hesabında kullanılacak 0 ile 1 arasındaki çarpım katsayısını belirler.
-  // --- MAKİNE EKİBİ ISO 2631 HASSAS KATSAYILARI VE İNTERPOLASYON MOTORU ---
-  static const List<double> _isoFreqs = [
-    0.1,
-    0.125,
-    0.16,
-    0.2,
-    0.25,
-    0.315,
-    0.4,
-    0.5,
-    0.63,
-    0.8,
-    1.0,
-    1.25,
-    1.6,
-    2.0,
-    2.5,
-    3.15,
-    4.0,
-    5.0,
-    6.3,
-    8.0,
-    10.0,
-    12.5,
-    16.0,
-    20.0,
-    25.0,
-    31.5,
-    40.0,
-    50.0,
-    63.0,
-    80.0,
-    100.0,
-    125.0,
-    160.0,
-    200.0,
-    250.0,
-    315.0,
-    400.0
-  ];
-
-  // Python kodundaki / 1000 işlemi Dart'ta listeye işlenmiştir
-  static const List<double> _wkRaw = [
-    0.0312,
-    0.0486,
-    0.079,
-    0.121,
-    0.182,
-    0.263,
-    0.352,
-    0.418,
-    0.459,
-    0.477,
-    0.482,
-    0.484,
-    0.494,
-    0.531,
-    0.631,
-    0.804,
-    0.967,
-    1.039,
-    1.054,
-    1.036,
-    0.988,
-    0.902,
-    0.768,
-    0.636,
-    0.513,
-    0.405,
-    0.314,
-    0.246,
-    0.186,
-    0.132,
-    0.0887,
-    0.054,
-    0.0285,
-    0.0152,
-    0.0079,
-    0.00398,
-    0.00195
-  ];
-
-  static const List<double> _wdRaw = [
-    0.0624,
-    0.0973,
-    0.158,
-    0.243,
-    0.365,
-    0.530,
-    0.713,
-    0.853,
-    0.944,
-    0.992,
-    1.011,
-    1.008,
-    0.968,
-    0.890,
-    0.776,
-    0.642,
-    0.512,
-    0.409,
-    0.323,
-    0.253,
-    0.212,
-    0.161,
-    0.125,
-    0.100,
-    0.080,
-    0.0632,
-    0.0494,
-    0.0388,
-    0.0295,
-    0.0211,
-    0.0141,
-    0.00863,
-    0.00455,
-    0.00243,
-    0.00126,
-    0.00064,
-    0.00031
-  ];
-
-  // Python'daki numpy.interp fonksiyonunun birebir Dart karşılığı
-  double _interp(double x, List<double> xp, List<double> fp) {
-    if (x <= xp.first) return fp.first;
-    if (x >= xp.last) return fp.last;
-    for (int i = 0; i < xp.length - 1; i++) {
-      if (x >= xp[i] && x <= xp[i + 1]) {
-        double t = (x - xp[i]) / (xp[i + 1] - xp[i]);
-        return fp[i] + t * (fp[i + 1] - fp[i]);
-      }
-    }
-    return 0.0;
-  }
-
-  // X ve Y ekseni için
-  double _getWdWeighting(double f) {
-    return _interp(f, _isoFreqs, _wdRaw);
-  }
-
-  // Z ekseni için (Makine ekibinin kullandığı standart)
-  double _getWkWeighting(double f) {
-    return _interp(f, _isoFreqs, _wkRaw);
-  }
-  // --------------------------------------------------------------------------
-
-  void _stopTest() {
-    if (!_isRunning) return;
-    HapticFeedback.lightImpact();
-
-    _accelerometerSubscription?.cancel();
-    _accelerometerSubscription = null;
-
-    _positionSubscription?.cancel();
-    _positionSubscription = null;
-
-    if (_testStartTime != null) {
-      _durationSeconds = DateTime.now().difference(_testStartTime!).inSeconds;
-    }
-
-    setState(() {
-      _isRunning = false;
-    });
-
-    _calculateSpeedStats();
-    _calculateIsoComfort();
-    _autoExportMachineData();
-  }
-
-  void _calculateSpeedStats() {
-    if (_speedHistory.isEmpty) return;
-
-    // 1. Ortalama Hızı Hesapla (Tüm hızları topla ve eleman sayısına böl)
-    double sum = 0;
-    for (double speed in _speedHistory) {
-      sum += speed;
-    }
-    _averageSpeedKmh = sum / _speedHistory.length;
-
-    // 2. Standart Sapmayı (Dalgalanmayı) Hesapla
-    double varianceSum = 0;
-    for (double speed in _speedHistory) {
-      // (Anlık Hız - Ortalama Hız) değerinin karesini alıp topluyoruz
-      varianceSum += pow(speed - _averageSpeedKmh, 2);
-    }
-
-    // Varyansın karekökünü alarak sapma miktarını buluyoruz
-    _speedDeviation = sqrt(varianceSum / _speedHistory.length);
-  }
-
-  Future<void> _autoExportMachineData() async {
-    if (_validationRows.isEmpty)
-      return; // Eski listeyi değil, yenisini kontrol ediyoruz
-    try {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('⏳ Doğrulama verisi hazırlanıyor...')),
-        );
-      }
-      final directory = await getTemporaryDirectory();
-      final file = File('${directory.path}/FFT_Dogrulama_Verisi.csv');
-      await file.writeAsString(_validationRows.join('\n'));
-      await Share.shareXFiles([XFile(file.path)],
-          text: 'MATLAB Doğrulama Verisi (512 Ham vs 256 FFT)');
-    } catch (e) {
-      debugPrint("Auto-Export Error: $e");
-    }
-  }
-
-  //_calculateIsoComfort() fonksiyonu,
-  //test bittiğinde yolculuğun genel konfor skorunu hesaplayarak tüm sürüş verilerini
-  //veritabanına kalıcı olarak kaydeder.
-  // İlk olarak, test boyunca saniyede bir toplanan sarsıntı skorlarının
-  // (_sessionRmsScores) karelerinin ortalamasının karekökünü alarak (RMS yöntemiyle)
-  // yolculuğun nihai konfor değerini (_finalRmsAv) hesaplar.
-  // Ardından; başlangıç ve bitiş koordinatları, toplam mesafe, süre, kullanıcıdan alınan araç/lastik bilgileri, telefon konumu ve JSON formatına çevrilmiş harita rotası gibi
-  // tüm parametreleri tek bir veri paketi (testData) haline getirir.
-  // Son olarak, bu paketi veritabanına (DatabaseHelper.instance.insertTest)
-  // yeni bir sürüş oturumu olarak kaydeder ve
-  // yolculuk sırasında tespit edilen tüm anomalileri de bu oturum kimliğiyle (session_id)
-  // veritabanına ekleyerek işlemi tamamlar.
-
-  Future<void> _calculateIsoComfort() async {
-    if (_sessionRmsScores.isEmpty) {
-      setState(() {
-        _finalRmsAv = 0.0;
-      });
-      return;
-    }
-
-    double sumSq = 0.0;
-    for (double av in _sessionRmsScores) {
-      sumSq += (av * av);
-    }
-    double totalTripAv = sqrt(sumSq / _sessionRmsScores.length);
-
-    setState(() {
-      _finalRmsAv = totalTripAv;
-    });
-
-    final now = DateTime.now();
-
-    double? startLat;
-    double? startLng;
-    double? endLat;
-    double? endLng;
-
-    if (_routeMap.isNotEmpty) {
-      startLat = _routeMap.first.latitude;
-      startLng = _routeMap.first.longitude;
-      endLat = _routeMap.last.latitude;
-      endLng = _routeMap.last.longitude;
-    }
-
-    final testData = {
-      'timestamp': now.toIso8601String(),
-      'score': _finalRmsAv,
-      'latitude': _currentPosition?.latitude,
-      'longitude': _currentPosition?.longitude,
-      'note': '',
-      'distance_km': _totalDistanceKm,
-      'duration_seconds': _durationSeconds,
-      'average_speed': _averageSpeedKmh, // YENİ
-      'speed_deviation': _speedDeviation, // YENİ
-      'start_lat': startLat,
-      'start_lng': startLng,
-      'end_lat': endLat,
-      'end_lng': endLng,
-      'anomaly_count': _sessionAnomalies.length,
-      'vehicle_info': _vehicleInfoController.text.trim().isEmpty
-          ? null
-          : _vehicleInfoController.text.trim(),
-      'tire_info': _tireInfoController.text.trim().isEmpty
-          ? null
-          : _tireInfoController.text.trim(),
-      'phone_placement': _selectedPhonePlacement,
-      'route_points': jsonEncode(_routeMap
-          .map((ll) => {'lat': ll.latitude, 'lng': ll.longitude})
-          .toList())
-    };
-
-    int newSessionId = await DatabaseHelper.instance.insertTest(testData);
-
-    for (var anomaly in _sessionAnomalies) {
-      anomaly['session_id'] = newSessionId;
-      await DatabaseHelper.instance.insertAnomaly(anomaly);
-    }
   }
 
   (String, Color) _getComfortLabel(double rms) {
@@ -1113,7 +1154,8 @@ class _IsoComfortScreenState extends State<IsoComfortScreen>
                     const SizedBox(width: 16),
                     Expanded(
                       child: GestureDetector(
-                        onTap: _isRunning ? _stopTest : null,
+                        // _stopTest is async; wrapping avoids VoidCallback mismatch.
+                        onTap: _isRunning ? () => _stopTest() : null,
                         child: _GlassCard(
                           borderGlow: _isRunning
                               ? Colors.redAccent.withOpacity(0.3)
@@ -1213,8 +1255,6 @@ class _IsoComfortScreenState extends State<IsoComfortScreen>
                                               fontSize: 12))
                                     ])
                                   ]),
-
-                              // ---- YENİ EKLENEN CANLI HIZ PANELİ ----
                               const SizedBox(height: 8),
                               Container(
                                 padding: const EdgeInsets.symmetric(
@@ -1249,8 +1289,6 @@ class _IsoComfortScreenState extends State<IsoComfortScreen>
                                   ],
                                 ),
                               ),
-                              // ---------------------------------------
-
                               const SizedBox(height: 12),
                               Expanded(
                                   child: ClipRRect(
@@ -1328,9 +1366,7 @@ class _IsoComfortScreenState extends State<IsoComfortScreen>
                                 maxX: maxX,
                                 lineTouchData:
                                     const LineTouchData(enabled: false),
-                                gridData: const FlGridData(
-                                  show: false,
-                                ),
+                                gridData: const FlGridData(show: false),
                                 titlesData: FlTitlesData(
                                   leftTitles: AxisTitles(
                                     sideTitles: SideTitles(
@@ -1467,6 +1503,10 @@ class _IsoComfortScreenState extends State<IsoComfortScreen>
     );
   }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// REUSABLE WIDGETS (unchanged)
+// ─────────────────────────────────────────────────────────────────────────────
 
 class _GlassCard extends StatelessWidget {
   final Widget child;

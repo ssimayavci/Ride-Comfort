@@ -1,5 +1,7 @@
 import 'dart:async';
+import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:path_provider/path_provider.dart';
 import 'iso_comfort_screen.dart';
 
 class SplashScreen extends StatefulWidget {
@@ -19,9 +21,13 @@ class _SplashScreenState extends State<SplashScreen> with SingleTickerProviderSt
     _pulseController = AnimationController(
         vsync: this, duration: const Duration(milliseconds: 1200))
       ..repeat(reverse: true);
-    
+
     _pulseAnimation = Tween<double>(begin: 0.2, end: 1.0).animate(
         CurvedAnimation(parent: _pulseController, curve: Curves.easeInOut));
+
+    // Fire-and-forget: clean up stale CSV files in the background.
+    // Runs concurrently with the 3-second splash delay so it costs nothing.
+    _cleanOldCsvFiles();
 
     Future.delayed(const Duration(seconds: 3), () {
       if (mounted) {
@@ -30,6 +36,31 @@ class _SplashScreenState extends State<SplashScreen> with SingleTickerProviderSt
         );
       }
     });
+  }
+
+  /// Deletes `machine_data_*.csv` files from the system temporary directory
+  /// that are older than 7 days. Each completed test produces one such file;
+  /// without cleanup they accumulate indefinitely and inflate the app's
+  /// on-device storage footprint — a common App Store review red flag.
+  Future<void> _cleanOldCsvFiles() async {
+    try {
+      final Directory tempDir = await getTemporaryDirectory();
+      final DateTime cutoff = DateTime.now().subtract(const Duration(days: 7));
+      await for (final FileSystemEntity entity in tempDir.list()) {
+        if (entity is File) {
+          final String name = entity.uri.pathSegments.last;
+          if (name.startsWith('machine_data_') && name.endsWith('.csv')) {
+            final FileStat stat = await entity.stat();
+            if (stat.modified.isBefore(cutoff)) {
+              await entity.delete();
+            }
+          }
+        }
+      }
+    } catch (e) {
+      // GC is best-effort; a failure here must never interrupt the splash flow.
+      debugPrint('CSV GC error: $e');
+    }
   }
 
   @override

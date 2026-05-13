@@ -1,3 +1,4 @@
+import 'dart:math';
 import 'package:sqflite/sqflite.dart';
 import 'package:path/path.dart';
 
@@ -21,7 +22,7 @@ class DatabaseHelper {
 
     return await openDatabase(
       path,
-      version: 7,
+      version: 8,
       onCreate: _createDB,
       onUpgrade: _upgradeDB,
       // SQLite disables foreign key enforcement by default. Without this,
@@ -73,6 +74,20 @@ CREATE TABLE road_anomalies (
   FOREIGN KEY (session_id) REFERENCES tests (id) ON DELETE CASCADE
 )
 ''');
+
+    // Global hazard registry — persists across all sessions.
+    // hit_count lets the UI rank hazards by recurrence severity.
+    await db.execute('''
+CREATE TABLE global_hazards (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  lat REAL NOT NULL,
+  lng REAL NOT NULL,
+  peak_score REAL NOT NULL,
+  first_seen TEXT NOT NULL,
+  last_seen TEXT NOT NULL,
+  hit_count INTEGER DEFAULT 1
+)
+''');
   }
 
   Future _upgradeDB(Database db, int oldVersion, int newVersion) async {
@@ -114,6 +129,20 @@ CREATE TABLE road_anomalies (
     if (oldVersion < 7) {
       await db.execute('ALTER TABLE tests ADD COLUMN average_speed REAL;');
       await db.execute('ALTER TABLE tests ADD COLUMN speed_deviation REAL;');
+    }
+    if (oldVersion < 8) {
+      // Creates the global hazard registry on devices upgrading from older builds.
+      await db.execute('''
+        CREATE TABLE IF NOT EXISTS global_hazards (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          lat REAL NOT NULL,
+          lng REAL NOT NULL,
+          peak_score REAL NOT NULL,
+          first_seen TEXT NOT NULL,
+          last_seen TEXT NOT NULL,
+          hit_count INTEGER DEFAULT 1
+        )
+      ''');
     }
   }
 
@@ -228,6 +257,102 @@ CREATE TABLE road_anomalies (
       where: 'id = ?',
       whereArgs: [id],
     );
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // GLOBAL HAZARD REGISTRY
+  // ─────────────────────────────────────────────────────────────────────────
+
+  /// Haversine distance in metres between two WGS-84 coordinates.
+  /// Pure dart:math — no external package dependency.
+  static double _haversineMeters(
+      double lat1, double lng1, double lat2, double lng2) {
+    const double r = 6371000.0; // Earth radius in metres
+    final double dLat = (lat2 - lat1) * pi / 180.0;
+    final double dLng = (lng2 - lng1) * pi / 180.0;
+    final double a = sin(dLat / 2) * sin(dLat / 2) +
+        cos(lat1 * pi / 180.0) *
+            cos(lat2 * pi / 180.0) *
+            sin(dLng / 2) *
+            sin(dLng / 2);
+    return r * 2 * atan2(sqrt(a), sqrt(1 - a));
+  }
+
+  /// Upserts a road hazard into the global registry.
+  ///
+  /// If an existing hazard already lies within [mergeRadiusMeters] of the
+  /// given coordinates, that record is updated instead of creating a duplicate:
+  /// hit_count is incremented, peak_score is raised if the new value is
+  /// higher, and last_seen is refreshed. This keeps the table dense with
+  /// meaningful clusters rather than scattered per-second duplicates.
+  ///
+  /// Returns the id of the affected row (inserted or updated).
+  Future<int> insertOrUpdateGlobalHazard({
+    required double lat,
+    required double lng,
+    required double peakScore,
+    double mergeRadiusMeters = 30.0,
+  }) async {
+    final db = await instance.database;
+    final String now = DateTime.now().toIso8601String();
+
+    // Load only the columns we need for the proximity scan.
+    final List<Map<String, dynamic>> existing = await db.query(
+      'global_hazards',
+      columns: ['id', 'lat', 'lng', 'peak_score', 'hit_count'],
+    );
+
+    for (final h in existing) {
+      final double dist = _haversineMeters(
+        lat, lng, h['lat'] as double, h['lng'] as double,
+      );
+      if (dist < mergeRadiusMeters) {
+        final double newPeak =
+            max(peakScore, (h['peak_score'] as num).toDouble());
+        await db.update(
+          'global_hazards',
+          {
+            'peak_score': newPeak,
+            'last_seen': now,
+            'hit_count': (h['hit_count'] as int) + 1,
+          },
+          where: 'id = ?',
+          whereArgs: [h['id']],
+        );
+        return h['id'] as int;
+      }
+    }
+
+    // No nearby hazard found — insert a brand-new record.
+    return await db.insert('global_hazards', {
+      'lat': lat,
+      'lng': lng,
+      'peak_score': peakScore,
+      'first_seen': now,
+      'last_seen': now,
+      'hit_count': 1,
+    });
+  }
+
+  /// Returns all global hazards ordered by most-recently seen.
+  Future<List<Map<String, dynamic>>> readAllGlobalHazards() async {
+    final db = await instance.database;
+    return await db.query('global_hazards', orderBy: 'last_seen DESC');
+  }
+
+  /// Returns the total count of persisted global hazard records.
+  Future<int> getGlobalHazardCount() async {
+    final db = await instance.database;
+    final result =
+        await db.rawQuery('SELECT COUNT(*) FROM global_hazards');
+    return Sqflite.firstIntValue(result) ?? 0;
+  }
+
+  /// Deletes every row from the global_hazards table.
+  /// Used by the Settings screen "Clear Hazard Cache" action.
+  Future<void> deleteAllGlobalHazards() async {
+    final db = await instance.database;
+    await db.delete('global_hazards');
   }
 
   Future close() async {

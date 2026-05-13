@@ -70,5 +70,7 @@
 		</array>
 		<key>UIStatusBarHidden</key>
 		<false/>
+		<key>NSLocationWhenInUseUsageDescription</key>
+		<string>Ride Comfort uses your location while the app is open to map your route, calculate trip distance, and geo-tag road anomalies such as potholes and speed bumps. Your location data is stored only on this device and is never shared.</string>
 	</dict>
 </plist>

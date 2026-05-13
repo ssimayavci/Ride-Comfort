@@ -16,9 +16,13 @@ import 'package:geolocator/geolocator.dart';
 import 'package:fftea/fftea.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart';
+import 'package:wakelock_plus/wakelock_plus.dart';
+import 'package:flutter_tts/flutter_tts.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import 'database_helper.dart';
 import 'history_screen.dart';
+import 'settings_screen.dart';
 
 // ═══════════════════════════════════════════════════════════════════════════
 // TOP-LEVEL SECTION — ISO 2631-1 CONSTANTS, HELPERS & COMPUTE ENTRY POINT
@@ -321,8 +325,7 @@ class IsoComfortScreen extends StatefulWidget {
   State<IsoComfortScreen> createState() => _IsoComfortScreenState();
 }
 
-class _IsoComfortScreenState extends State<IsoComfortScreen>
-    with SingleTickerProviderStateMixin {
+class _IsoComfortScreenState extends State<IsoComfortScreen> {
   StreamSubscription<AccelerometerEvent>? _accelerometerSubscription;
 
   // Validation rows (bounded: first FFT block only, ≤ 769 strings).
@@ -336,6 +339,12 @@ class _IsoComfortScreenState extends State<IsoComfortScreen>
 
   static const int _fftWindowSize = 512;
   static const double _samplingRate = 50.0;
+
+  /// Distance threshold (metres) that triggers a hazard voice alert.
+  static const double _hazardProximityMeters = 50.0;
+
+  /// Minimum seconds that must elapse before the same hazard fires again.
+  static const int _alertCooldownSeconds = 60;
 
   // ── CHANGE 1: Queue<double> replaces List<double> ──────────────────────
   // Queue.removeFirst() / addLast() are O(1) vs List.removeAt(0) which is
@@ -381,33 +390,170 @@ class _IsoComfortScreenState extends State<IsoComfortScreen>
   // flat regardless of session length.
   IOSink? _csvSink;
 
+  // ── Wakelock + live stopwatch ─────────────────────────────────────────────
+  // Timer fires every second while a test is running; _elapsedSeconds drives
+  // the MM:SS display and is reset to zero each time a new test starts.
+  Timer? _stopwatchTimer;
+  int _elapsedSeconds = 0;
+
+  // ── Phase 3: Proactive Hazard Assistant ───────────────────────────────────
+  final FlutterTts _tts = FlutterTts();
+
+  /// Full list of global_hazards loaded from DB at app start and refreshed at
+  /// the beginning of each test so newly recorded hazards are always current.
+  List<Map<String, dynamic>> _globalHazards = [];
+
+  /// Last alert timestamp per hazard id — enforces the 60-second cooldown so
+  /// a single rough patch doesn't spam the driver repeatedly.
+  final Map<int, DateTime> _hazardAlertTimes = {};
+
+  /// True while the proximity warning banner is being displayed.
+  bool _isHazardWarningActive = false;
+
+  /// Toggled by [_hazardBlinkTimer] to produce a pulsing opacity effect.
+  bool _hazardWarningVisible = false;
+
+  /// Dismisses the warning banner after 5 seconds.
+  Timer? _hazardWarningTimer;
+
+  /// Flips [_hazardWarningVisible] every 500 ms for the blink animation.
+  Timer? _hazardBlinkTimer;
+
   final TextEditingController _vehicleInfoController = TextEditingController();
   final TextEditingController _tireInfoController = TextEditingController();
   String _selectedPhonePlacement = "Yolcu Koltuğu";
 
-  late AnimationController _pulseController;
-  late Animation<double> _pulseAnimation;
-
   @override
   void initState() {
     super.initState();
-    _pulseController = AnimationController(
-        vsync: this, duration: const Duration(milliseconds: 800))
-      ..repeat(reverse: true);
-    _pulseAnimation = Tween<double>(begin: 0.2, end: 1.0).animate(
-        CurvedAnimation(parent: _pulseController, curve: Curves.easeInOut));
+    _initTts();
+    _loadGlobalHazards();
+    _loadSavedSettings();
   }
 
   @override
   void dispose() {
     _vehicleInfoController.dispose();
     _tireInfoController.dispose();
-    _pulseController.dispose();
+    _stopwatchTimer?.cancel();
+    _hazardBlinkTimer?.cancel();
+    _hazardWarningTimer?.cancel();
+    // Safety net: release wakelock, stop TTS, and close the sink if disposed mid-test.
+    WakelockPlus.disable();
+    _tts.stop();
     _accelerometerSubscription?.cancel();
     _positionSubscription?.cancel();
-    // Safety net: close the sink if the widget is disposed mid-test.
     _csvSink?.close();
     super.dispose();
+  }
+
+  /// Formats [s] seconds as a zero-padded MM:SS string (e.g. 125 → "02:05").
+  String _formatElapsed(int s) {
+    final int m = s ~/ 60;
+    final int sec = s % 60;
+    return '${m.toString().padLeft(2, '0')}:${sec.toString().padLeft(2, '0')}';
+  }
+  Future<void> _initTts() async {
+    try {
+      await _tts.setLanguage('tr-TR');
+      await _tts.setSpeechRate(0.45); // Sürüş sırasında netlik için biraz yavaş
+      await _tts.setVolume(1.0);
+      await _tts.setPitch(1.0);
+
+      await _tts.speak("Sistem hazır Simay, sürüşe başlayabilirsin.");
+    } catch (e) {
+      debugPrint('TTS init error: $e');
+    }
+  }
+
+  /// Fetches all persisted hazards from the DB into [_globalHazards].
+  /// Called once on startup and again at the start of every new test so
+  /// hazards recorded during the previous drive are immediately available.
+  Future<void> _loadGlobalHazards() async {
+    final hazards = await DatabaseHelper.instance.readAllGlobalHazards();
+    if (mounted) setState(() => _globalHazards = hazards);
+  }
+
+  /// Reads the user's saved default vehicle / tyre info from SharedPreferences
+  /// and pre-populates the pre-test dialog controllers.
+  /// Called on startup and again whenever the Settings screen is popped.
+  Future<void> _loadSavedSettings() async {
+    final prefs = await SharedPreferences.getInstance();
+    if (!mounted) return;
+    final vehicle = prefs.getString(kPrefVehicleInfo) ?? '';
+    final tire = prefs.getString(kPrefTireInfo) ?? '';
+    // Only update if the user hasn't already typed something in this session.
+    if (_vehicleInfoController.text.isEmpty) {
+      _vehicleInfoController.text = vehicle;
+    }
+    if (_tireInfoController.text.isEmpty) {
+      _tireInfoController.text = tire;
+    }
+  }
+
+  /// Called on every GPS position update while a test is running.
+  ///
+  /// Scans [_globalHazards] with [Geolocator.distanceBetween] (no
+  /// approximation — uses Vincenty formula) and fires [_triggerHazardAlert]
+  /// when within [_hazardProximityMeters], subject to per-hazard cooldown.
+  void _checkHazardProximity(Position position) {
+    if (!_isRunning || _globalHazards.isEmpty) return;
+    final DateTime now = DateTime.now();
+    for (final hazard in _globalHazards) {
+      final double dist = Geolocator.distanceBetween(
+        position.latitude,
+        position.longitude,
+        hazard['lat'] as double,
+        hazard['lng'] as double,
+      );
+      if (dist <= _hazardProximityMeters) {
+        final int id = hazard['id'] as int;
+        final DateTime? lastAlert = _hazardAlertTimes[id];
+        if (lastAlert == null ||
+            now.difference(lastAlert).inSeconds >= _alertCooldownSeconds) {
+          _hazardAlertTimes[id] = now;
+          _triggerHazardAlert(); // async; intentionally fire-and-forget
+          return; // one alert at a time — don't stack multiple hazards
+        }
+      }
+    }
+  }
+
+  /// Shows the blinking warning banner for 5 seconds and speaks the alert.
+  Future<void> _triggerHazardAlert() async {
+    _hazardBlinkTimer?.cancel();
+    _hazardWarningTimer?.cancel();
+
+    setState(() {
+      _isHazardWarningActive = true;
+      _hazardWarningVisible = true;
+    });
+
+    // Blink every 500 ms — fast enough to be urgent, not so fast it's epileptic.
+    _hazardBlinkTimer = Timer.periodic(const Duration(milliseconds: 500), (_) {
+      if (mounted)
+        setState(() => _hazardWarningVisible = !_hazardWarningVisible);
+    });
+
+    // Auto-dismiss after 5 seconds.
+    _hazardWarningTimer = Timer(const Duration(seconds: 5), () {
+      _hazardBlinkTimer?.cancel();
+      _hazardBlinkTimer = null;
+      if (mounted) {
+        setState(() {
+          _isHazardWarningActive = false;
+          _hazardWarningVisible = false;
+        });
+      }
+    });
+
+    // Voice alert — non-blocking; TTS handles its own queue internally.
+    try {
+      await _tts
+          .speak('Dikkat, 50 metre sonra bozuk zemin, lütfen yavaşlayın.');
+    } catch (e) {
+      debugPrint('TTS speak error: $e');
+    }
   }
 
   void _showPreTestDialog() {
@@ -621,6 +767,27 @@ class _IsoComfortScreenState extends State<IsoComfortScreen>
       _averageSpeedKmh = 0.0;
       _speedDeviation = 0.0;
       _speedHistory.clear();
+      _elapsedSeconds = 0;
+      _hazardAlertTimes.clear();
+      _isHazardWarningActive = false;
+      _hazardWarningVisible = false;
+    });
+
+    // Refresh hazard list so any hazards recorded in previous sessions are
+    // already loaded before the first GPS tick arrives.
+    _loadGlobalHazards();
+
+    // Prevent the screen from sleeping while a test is active.
+    // WhenInUse location permission is sufficient because wakelock keeps
+    // the app in the foreground for the entire session.
+    WakelockPlus.enable();
+
+    // Live stopwatch — ticks every second, rebuilds only the timer label.
+    _stopwatchTimer?.cancel();
+    _stopwatchTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (_isRunning && mounted) {
+        setState(() => _elapsedSeconds++);
+      }
     });
 
     // Open the streaming CSV file. The await here is negligible in practice
@@ -753,6 +920,14 @@ class _IsoComfortScreenState extends State<IsoComfortScreen>
             'timestamp': now.toIso8601String(),
             'peak_score': finalBlockAv,
           });
+          // Persist to the global hazard registry so future drives can warn
+          // the driver about this location. Fire-and-forget — the DB write
+          // must not block the UI or the FFT dispatch guard.
+          unawaited(DatabaseHelper.instance.insertOrUpdateGlobalHazard(
+            lat: _currentPosition!.latitude,
+            lng: _currentPosition!.longitude,
+            peakScore: finalBlockAv,
+          ));
         }
       }
     }
@@ -776,6 +951,14 @@ class _IsoComfortScreenState extends State<IsoComfortScreen>
     if (!_isRunning) return;
     HapticFeedback.lightImpact();
 
+    _stopwatchTimer?.cancel();
+    _stopwatchTimer = null;
+    _hazardBlinkTimer?.cancel();
+    _hazardBlinkTimer = null;
+    _hazardWarningTimer?.cancel();
+    _hazardWarningTimer = null;
+    WakelockPlus.disable();
+
     _accelerometerSubscription?.cancel();
     _accelerometerSubscription = null;
     _positionSubscription?.cancel();
@@ -787,6 +970,8 @@ class _IsoComfortScreenState extends State<IsoComfortScreen>
 
     setState(() {
       _isRunning = false;
+      _isHazardWarningActive = false;
+      _hazardWarningVisible = false;
     });
 
     // Flush any OS-buffered bytes and close the file handle before we
@@ -927,6 +1112,9 @@ class _IsoComfortScreenState extends State<IsoComfortScreen>
     ).listen((Position position) {
       if (!_isRunning) return;
       if (position.accuracy > 25.0) return;
+
+      // Phase 3: check proximity to all known hazards on every valid GPS tick.
+      _checkHazardProximity(position);
 
       final newPoint = LatLng(position.latitude, position.longitude);
 
@@ -1089,14 +1277,36 @@ class _IsoComfortScreenState extends State<IsoComfortScreen>
         iconTheme: const IconThemeData(color: Colors.white),
         actions: [
           IconButton(
+            icon: const Icon(Icons.settings_outlined),
+            tooltip: 'Ayarlar',
+            onPressed: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(
+                    builder: (context) => const SettingsScreen()),
+              ).then((_) {
+                // Reload defaults in case the user updated them in Settings.
+                final prefs = SharedPreferences.getInstance();
+                prefs.then((p) {
+                  if (!mounted) return;
+                  _vehicleInfoController.text =
+                      p.getString(kPrefVehicleInfo) ?? _vehicleInfoController.text;
+                  _tireInfoController.text =
+                      p.getString(kPrefTireInfo) ?? _tireInfoController.text;
+                });
+              });
+            },
+          ),
+          IconButton(
             icon: const Icon(Icons.history_outlined),
+            tooltip: 'Geçmiş',
             onPressed: () {
               Navigator.push(
                 context,
                 MaterialPageRoute(builder: (context) => const HistoryScreen()),
               );
             },
-          )
+          ),
         ],
       ),
       body: Container(
@@ -1190,6 +1400,11 @@ class _IsoComfortScreenState extends State<IsoComfortScreen>
                   ],
                 ),
                 const SizedBox(height: 16),
+                // Phase 3: hazard proximity warning (only visible when active).
+                if (_isHazardWarningActive) ...[
+                  _buildHazardWarning(),
+                  const SizedBox(height: 16),
+                ],
                 Expanded(
                   flex: 2,
                   child: _GlassCard(
@@ -1327,32 +1542,31 @@ class _IsoComfortScreenState extends State<IsoComfortScreen>
                                 ],
                               ),
                               if (_isRunning)
-                                FadeTransition(
-                                  opacity: _pulseAnimation,
-                                  child: Row(
-                                    children: [
-                                      Container(
-                                        width: 8,
-                                        height: 8,
-                                        decoration: const BoxDecoration(
-                                            color: Colors.redAccent,
-                                            shape: BoxShape.circle,
-                                            boxShadow: [
-                                              BoxShadow(
-                                                  color: Colors.redAccent,
-                                                  blurRadius: 4,
-                                                  spreadRadius: 1)
-                                            ]),
-                                      ),
-                                      const SizedBox(width: 6),
-                                      const Text('REC',
-                                          style: TextStyle(
-                                              fontSize: 10,
-                                              fontWeight: FontWeight.w800,
-                                              color: Colors.redAccent,
-                                              letterSpacing: 1.5)),
-                                    ],
-                                  ),
+                                Row(
+                                  children: [
+                                    Container(
+                                      width: 8,
+                                      height: 8,
+                                      decoration: const BoxDecoration(
+                                          color: Colors.redAccent,
+                                          shape: BoxShape.circle,
+                                          boxShadow: [
+                                            BoxShadow(
+                                                color: Colors.redAccent,
+                                                blurRadius: 4,
+                                                spreadRadius: 1)
+                                          ]),
+                                    ),
+                                    const SizedBox(width: 6),
+                                    Text(
+                                      _formatElapsed(_elapsedSeconds),
+                                      style: const TextStyle(
+                                          fontSize: 10,
+                                          fontWeight: FontWeight.w800,
+                                          color: Colors.redAccent,
+                                          letterSpacing: 1.5),
+                                    ),
+                                  ],
                                 ),
                             ],
                           ),
@@ -1433,6 +1647,77 @@ class _IsoComfortScreenState extends State<IsoComfortScreen>
               ],
             ),
           ),
+        ),
+      ),
+    );
+  }
+
+  /// Full-width blinking warning banner shown when approaching a known hazard.
+  /// Uses [AnimatedOpacity] driven by [_hazardWarningVisible] for a smooth
+  /// pulse rather than a hard show/hide flash.
+  Widget _buildHazardWarning() {
+    return AnimatedOpacity(
+      opacity: _hazardWarningVisible ? 1.0 : 0.15,
+      duration: const Duration(milliseconds: 400),
+      child: Container(
+        width: double.infinity,
+        padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 16),
+        decoration: BoxDecoration(
+          color: Colors.orange.withOpacity(0.12),
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(
+              color: Colors.orangeAccent.withOpacity(0.8), width: 1.5),
+          boxShadow: [
+            BoxShadow(
+                color: Colors.orangeAccent.withOpacity(0.25),
+                blurRadius: 16,
+                spreadRadius: 2)
+          ],
+        ),
+        child: Row(
+          children: [
+            const Icon(Icons.warning_amber_rounded,
+                color: Colors.orangeAccent, size: 30),
+            const SizedBox(width: 12),
+            const Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'BOZUK ZEMİN UYARISI',
+                    style: TextStyle(
+                      color: Colors.orangeAccent,
+                      fontSize: 13,
+                      fontWeight: FontWeight.w900,
+                      letterSpacing: 1.5,
+                    ),
+                  ),
+                  SizedBox(height: 2),
+                  Text(
+                    'Yaklaşık 50 metre ileride kayıtlı bozuk zemin',
+                    style: TextStyle(
+                        color: Colors.orange,
+                        fontSize: 10,
+                        fontWeight: FontWeight.w500),
+                  ),
+                ],
+              ),
+            ),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+              decoration: BoxDecoration(
+                color: Colors.orangeAccent.withOpacity(0.2),
+                borderRadius: BorderRadius.circular(6),
+              ),
+              child: const Text(
+                '< 50m',
+                style: TextStyle(
+                    color: Colors.orangeAccent,
+                    fontSize: 11,
+                    fontWeight: FontWeight.w900),
+              ),
+            ),
+          ],
         ),
       ),
     );

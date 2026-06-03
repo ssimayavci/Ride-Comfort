@@ -1,3 +1,4 @@
+import 'main.dart';
 import 'dart:async';
 import 'dart:collection'; // NEW: Queue for O(1) sliding-window front-removal
 import 'dart:math';
@@ -19,6 +20,7 @@ import 'package:latlong2/latlong.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 import 'package:flutter_tts/flutter_tts.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:flutter_siri_suggestions/flutter_siri_suggestions.dart';
 
 import 'database_helper.dart';
 import 'history_screen.dart';
@@ -333,6 +335,11 @@ class _IsoComfortScreenState extends State<IsoComfortScreen> {
 
   bool _isRunning = false;
 
+  // ── STEP 1: Tracks whether the current test was started via Siri.
+  // Drives the post-test routing: Siri start → show post-test dialog first;
+  // manual start → save and show SnackBar immediately.
+  bool _startedViaSiri = false;
+
   /// Guards against dispatching a new isolate before the previous one returns.
   /// Without this, rapid ticks could stack multiple concurrent compute() calls.
   bool _isProcessingFft = false;
@@ -423,16 +430,81 @@ class _IsoComfortScreenState extends State<IsoComfortScreen> {
   final TextEditingController _tireInfoController = TextEditingController();
   String _selectedPhonePlacement = "Yolcu Koltuğu";
 
+  // ── Phase 4: Siri Shortcuts ──────────────────────────────────────────────
+  // Activity-type strings are the reverse-DNS identifiers registered in
+  // NSUserActivityTypes in Info.plist. They MUST match exactly.
+  static const String _kSiriStartTest = 'com.emir.konforolcer.start_test';
+  static const String _kSiriStopTest = 'com.emir.konforolcer.stop_test';
+
+  static FlutterSiriActivity get _startActivity => FlutterSiriActivity(
+        'Testi Başlat',
+        _kSiriStartTest,
+        isEligibleForSearch: true,
+        isEligibleForPrediction: true,
+        contentDescription: 'Sürüş testini başlatır',
+        suggestedInvocationPhrase: 'Testi başlat',
+        userInfo: const {
+          'activityType': _kSiriStartTest
+        }, // <--- SİHİRLİ DOKUNUŞ BURASI
+      );
+
+  static FlutterSiriActivity get _stopActivity => FlutterSiriActivity(
+        'Testi Bitir',
+        _kSiriStopTest,
+        isEligibleForSearch: true,
+        isEligibleForPrediction: true,
+        contentDescription: 'Sürüş testini bitirir',
+        suggestedInvocationPhrase: 'Testi bitir',
+        userInfo: const {
+          'activityType': _kSiriStopTest
+        }, // <--- SİHİRLİ DOKUNUŞ BURASI
+      );
+
   @override
   void initState() {
     super.initState();
     _initTts();
+    _initSiriShortcuts();
     _loadGlobalHazards();
     _loadSavedSettings();
+
+    // Listen to global Siri notifier
+    SiriGlobalState.siriIntentNotifier.addListener(_onSiriIntentChanged);
+
+    // Initial check (Cold Start)
+    if (SiriGlobalState.siriIntentNotifier.value != null) {
+      _handleSiriIntent(SiriGlobalState.siriIntentNotifier.value);
+    }
+  }
+
+  void _onSiriIntentChanged() {
+    final intent = SiriGlobalState.siriIntentNotifier.value;
+    if (intent != null) {
+      _handleSiriIntent(intent);
+    }
+  }
+
+  void _handleSiriIntent(String? intent) {
+    if (intent == null) return;
+    // Consume the intent immediately by resetting to null.
+    SiriGlobalState.siriIntentNotifier.value = null;
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (intent == _kSiriStartTest && !_isRunning) {
+        debugPrint("🟢 Global'den start emri geldi, test başlatılıyor!");
+        // ── STEP 2: Mark that this test was triggered hands-free via Siri.
+        _startedViaSiri = true;
+        _startTest();
+      } else if (intent == _kSiriStopTest && _isRunning) {
+        debugPrint("🔴 Global'den stop emri geldi, test durduruluyor!");
+        _stopTest();
+      }
+    });
   }
 
   @override
   void dispose() {
+    SiriGlobalState.siriIntentNotifier.removeListener(_onSiriIntentChanged);
     _vehicleInfoController.dispose();
     _tireInfoController.dispose();
     _stopwatchTimer?.cancel();
@@ -453,6 +525,7 @@ class _IsoComfortScreenState extends State<IsoComfortScreen> {
     final int sec = s % 60;
     return '${m.toString().padLeft(2, '0')}:${sec.toString().padLeft(2, '0')}';
   }
+
   Future<void> _initTts() async {
     try {
       await _tts.setLanguage('tr-TR');
@@ -460,7 +533,7 @@ class _IsoComfortScreenState extends State<IsoComfortScreen> {
       await _tts.setVolume(1.0);
       await _tts.setPitch(1.0);
 
-      await _tts.speak("Sistem hazır Simay, sürüşe başlayabilirsin.");
+      //await _tts.speak("Sistem hazır Simay, sürüşe başlayabilirsin.");
     } catch (e) {
       debugPrint('TTS init error: $e');
     }
@@ -488,6 +561,24 @@ class _IsoComfortScreenState extends State<IsoComfortScreen> {
     }
     if (_tireInfoController.text.isEmpty) {
       _tireInfoController.text = tire;
+    }
+  }
+
+  /// Configures the Siri shortcut handler and registers both persistent
+  /// activity types so iOS can immediately suggest them — even before the
+  /// user has manually triggered either action for the first time.
+  ///
+  /// [onLaunch] fires whenever the user activates a registered shortcut while
+  /// the app is in the background or completely terminated.  The map always
+  /// contains an 'activityType' key matching one of [_kSiriStartTest] /
+  /// [_kSiriStopTest], plus any [userInfo] that was set at registration time.
+  Future<void> _initSiriShortcuts() async {
+    try {
+      // Registering without a prior user interaction seeds Siri's index...
+      FlutterSiriSuggestions.instance.registerActivity(_startActivity);
+      FlutterSiriSuggestions.instance.registerActivity(_stopActivity);
+    } catch (e) {
+      debugPrint('Siri init error: $e');
     }
   }
 
@@ -548,12 +639,14 @@ class _IsoComfortScreenState extends State<IsoComfortScreen> {
     });
 
     // Voice alert — non-blocking; TTS handles its own queue internally.
+    /*
     try {
       await _tts
           .speak('Dikkat, 50 metre sonra bozuk zemin, lütfen yavaşlayın.');
     } catch (e) {
       debugPrint('TTS speak error: $e');
     }
+    */
   }
 
   void _showPreTestDialog() {
@@ -710,8 +803,10 @@ class _IsoComfortScreenState extends State<IsoComfortScreen> {
                                             .withOpacity(0.5))),
                               ),
                               onPressed: () {
+                                // ── STEP 3: Manual start — mark as non-Siri.
                                 setState(() {
                                   _selectedPhonePlacement = tempPlacement;
+                                  _startedViaSiri = false;
                                 });
                                 Navigator.pop(context);
                                 _startTest(); // async; fire-and-forget is fine here
@@ -798,6 +893,11 @@ class _IsoComfortScreenState extends State<IsoComfortScreen> {
     _csvSink = File('${directory.path}/machine_data_$ts.csv').openWrite();
     _csvSink!
         .writeln("Zaman_s;Ivme_X;Ivme_Y;Ivme_Z;Frekans_Hz;FFT_X;FFT_Y;FFT_Z");
+
+    // Donate to Siri: reinforces the usage pattern so iOS learns to suggest
+    // "start test" proactively (e.g. on lock screen at the user's usual
+    // drive time). Fire-and-forget — must not block the sensor pipeline.
+    unawaited(FlutterSiriSuggestions.instance.registerActivity(_startActivity));
 
     _fetchLocationAndStartStream();
 
@@ -935,7 +1035,8 @@ class _IsoComfortScreenState extends State<IsoComfortScreen> {
     setState(() {
       _sessionRmsScores.add(finalBlockAv);
       _finalRmsAv = finalBlockAv;
-      _chartData.add(FlSpot(_timeCounterChart, finalBlockAv));
+      // Grafikte taşmayı önlemek için değeri 0 ile 10 arasına sıkıştırıyoruz (clamp)
+      _chartData.add(FlSpot(_timeCounterChart, finalBlockAv.clamp(0.0, 10.0)));
       _timeCounterChart += 1;
       if (_chartData.length > _maxDataPoints) {
         _chartData.removeAt(0);
@@ -945,8 +1046,8 @@ class _IsoComfortScreenState extends State<IsoComfortScreen> {
     _isProcessingFft = false;
   }
 
-  // ── CHANGE 2 cont.: async so we can flush/close the IOSink before the
-  // final score calculation reads session data.
+  // ── STEP 4: _stopTest now only stops sensors and routes to the correct
+  // post-test flow. Score calculation and SnackBar live in _saveTestAndFinish.
   Future<void> _stopTest() async {
     if (!_isRunning) return;
     HapticFeedback.lightImpact();
@@ -981,8 +1082,272 @@ class _IsoComfortScreenState extends State<IsoComfortScreen> {
     _csvSink = null;
 
     _calculateSpeedStats();
-    _calculateIsoComfort();
-    _autoExportMachineData();
+
+    // Donate to Siri: iOS learns to suggest "stop test" once the user has
+    // an active session.  Fire-and-forget — CSV is already closed above.
+    unawaited(FlutterSiriSuggestions.instance.registerActivity(_stopActivity));
+
+    // Route based on how the test was started:
+    //   Siri  → post-test dialog so the driver can fill in vehicle info
+    //   Manual → save immediately and show the SnackBar
+    if (_startedViaSiri) {
+      _showPostTestDialog();
+    } else {
+      await _saveTestAndFinish();
+    }
+  }
+
+  // ── STEP 5a: Calculates the final ISO comfort score, persists the session
+  // to the database, and shows the completion SnackBar.
+  // Called either directly from _stopTest (manual start) or from the
+  // post-test dialog buttons (Siri start).
+  Future<void> _saveTestAndFinish() async {
+    await _calculateIsoComfort();
+
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Row(
+            children: [
+              const Expanded(
+                child: Text(
+                  'Test başarıyla kaydedildi.',
+                  style: TextStyle(
+                      fontWeight: FontWeight.bold,
+                      color: Colors.white,
+                      fontSize: 13),
+                ),
+              ),
+              TextButton(
+                onPressed: () {
+                  // Bildirimi anında gizle ve geçmişe git
+                  ScaffoldMessenger.of(context).hideCurrentSnackBar();
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                        builder: (context) => const HistoryScreen()),
+                  );
+                },
+                child: const Text('SONUÇLAR',
+                    style: TextStyle(
+                        color: Colors.greenAccent,
+                        fontWeight: FontWeight.w900,
+                        fontSize: 12)),
+              ),
+              TextButton(
+                onPressed: () {
+                  // Sadece bildirimi gizle, ekranda (grafikte) kal
+                  ScaffoldMessenger.of(context).hideCurrentSnackBar();
+                },
+                child: const Text('KAPAT',
+                    style: TextStyle(
+                        color: Colors.white54,
+                        fontWeight: FontWeight.bold,
+                        fontSize: 12)),
+              ),
+            ],
+          ),
+          behavior: SnackBarBehavior.floating,
+          backgroundColor: const Color(0xFF0F172A),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(10),
+            side: BorderSide(color: Colors.greenAccent.withOpacity(0.3)),
+          ),
+          duration: const Duration(seconds: 10),
+          padding: const EdgeInsets.only(left: 16, right: 4, top: 4, bottom: 4),
+        ),
+      );
+    }
+  }
+
+  // ── STEP 5b: Post-test dialog shown after a Siri-initiated test ends.
+  // The driver was hands-free during the ride so they couldn't fill in vehicle
+  // info beforehand. This dialog lets them do it after — or skip entirely.
+  void _showPostTestDialog() {
+    String tempPlacement = _selectedPhonePlacement;
+
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (BuildContext context) {
+        return StatefulBuilder(builder: (context, setDialogState) {
+          return Dialog(
+            backgroundColor: Colors.transparent,
+            child: _GlassCard(
+              borderGlow: Colors.greenAccent.withOpacity(0.5),
+              child: Padding(
+                padding: const EdgeInsets.all(24.0),
+                child: SingleChildScrollView(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      const Text(
+                        'SÜRÜŞ TAMAMLANDI',
+                        textAlign: TextAlign.center,
+                        style: TextStyle(
+                            fontSize: 18,
+                            fontWeight: FontWeight.bold,
+                            color: Colors.white,
+                            letterSpacing: 1.5),
+                      ),
+                      const SizedBox(height: 8),
+                      const Text(
+                        'Araç bilgilerini doğrulayın veya atlayın.',
+                        textAlign: TextAlign.center,
+                        style: TextStyle(color: Colors.blueGrey, fontSize: 12),
+                      ),
+                      const SizedBox(height: 24),
+                      const Text('Araç Bilgisi',
+                          style: TextStyle(
+                              color: Colors.blueGrey,
+                              fontSize: 12,
+                              fontWeight: FontWeight.bold)),
+                      const SizedBox(height: 8),
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 16),
+                        decoration: BoxDecoration(
+                          color: Colors.white.withOpacity(0.05),
+                          borderRadius: BorderRadius.circular(8),
+                          border: Border.all(
+                              color: Colors.blueGrey.withOpacity(0.3)),
+                        ),
+                        child: TextField(
+                          controller: _vehicleInfoController,
+                          style: const TextStyle(color: Colors.white),
+                          decoration: const InputDecoration(
+                            border: InputBorder.none,
+                            hintText: "Örn: Renault Megane 4",
+                            hintStyle: TextStyle(color: Colors.blueGrey),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 16),
+                      const Text('Lastik Bilgisi',
+                          style: TextStyle(
+                              color: Colors.blueGrey,
+                              fontSize: 12,
+                              fontWeight: FontWeight.bold)),
+                      const SizedBox(height: 8),
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 16),
+                        decoration: BoxDecoration(
+                          color: Colors.white.withOpacity(0.05),
+                          borderRadius: BorderRadius.circular(8),
+                          border: Border.all(
+                              color: Colors.blueGrey.withOpacity(0.3)),
+                        ),
+                        child: TextField(
+                          controller: _tireInfoController,
+                          style: const TextStyle(color: Colors.white),
+                          decoration: const InputDecoration(
+                            border: InputBorder.none,
+                            hintText: "Örn: 205/55 R16 Yaz Lastiği",
+                            hintStyle: TextStyle(color: Colors.blueGrey),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 16),
+                      const Text('Telefon Konumu',
+                          style: TextStyle(
+                              color: Colors.blueGrey,
+                              fontSize: 12,
+                              fontWeight: FontWeight.bold)),
+                      const SizedBox(height: 8),
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 16),
+                        decoration: BoxDecoration(
+                          color: Colors.white.withOpacity(0.05),
+                          borderRadius: BorderRadius.circular(8),
+                          border: Border.all(
+                              color: Colors.blueGrey.withOpacity(0.3)),
+                        ),
+                        child: DropdownButtonHideUnderline(
+                          child: DropdownButton<String>(
+                            value: tempPlacement,
+                            dropdownColor: const Color(0xFF0F172A),
+                            icon: const Icon(Icons.arrow_drop_down,
+                                color: Colors.blueAccent),
+                            isExpanded: true,
+                            style: const TextStyle(
+                                color: Colors.white, fontSize: 16),
+                            onChanged: (String? newValue) {
+                              setDialogState(() {
+                                tempPlacement = newValue!;
+                              });
+                            },
+                            items: <String>[
+                              "Yolcu Koltuğu",
+                              "Konsol / Torpido",
+                              "Ön Cam Tutucu",
+                              "Zemin"
+                            ].map<DropdownMenuItem<String>>((String value) {
+                              return DropdownMenuItem<String>(
+                                value: value,
+                                child: Text(value),
+                              );
+                            }).toList(),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 32),
+                      Row(
+                        children: [
+                          Expanded(
+                            child: ElevatedButton(
+                              style: ElevatedButton.styleFrom(
+                                backgroundColor: Colors.white10,
+                                foregroundColor: Colors.white,
+                                padding:
+                                    const EdgeInsets.symmetric(vertical: 16),
+                                shape: RoundedRectangleBorder(
+                                    borderRadius: BorderRadius.circular(8)),
+                              ),
+                              onPressed: () {
+                                Navigator.pop(context);
+                                _saveTestAndFinish();
+                              },
+                              child: const Text('ATLA'),
+                            ),
+                          ),
+                          const SizedBox(width: 12),
+                          Expanded(
+                            child: ElevatedButton(
+                              style: ElevatedButton.styleFrom(
+                                backgroundColor:
+                                    Colors.greenAccent.withOpacity(0.2),
+                                foregroundColor: Colors.greenAccent,
+                                padding:
+                                    const EdgeInsets.symmetric(vertical: 16),
+                                shape: RoundedRectangleBorder(
+                                    borderRadius: BorderRadius.circular(8),
+                                    side: BorderSide(
+                                        color: Colors.greenAccent
+                                            .withOpacity(0.5))),
+                              ),
+                              onPressed: () {
+                                setState(() {
+                                  _selectedPhonePlacement = tempPlacement;
+                                });
+                                Navigator.pop(context);
+                                _saveTestAndFinish();
+                              },
+                              child: const Text('KAYDET',
+                                  style:
+                                      TextStyle(fontWeight: FontWeight.bold)),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          );
+        });
+      },
+    );
   }
 
   void _calculateSpeedStats() {
@@ -998,24 +1363,6 @@ class _IsoComfortScreenState extends State<IsoComfortScreen> {
       varianceSum += pow(speed - _averageSpeedKmh, 2);
     }
     _speedDeviation = sqrt(varianceSum / _speedHistory.length);
-  }
-
-  Future<void> _autoExportMachineData() async {
-    if (_validationRows.isEmpty) return;
-    try {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('⏳ Doğrulama verisi hazırlanıyor...')),
-        );
-      }
-      final directory = await getTemporaryDirectory();
-      final file = File('${directory.path}/FFT_Dogrulama_Verisi.csv');
-      await file.writeAsString(_validationRows.join('\n'));
-      await Share.shareXFiles([XFile(file.path)],
-          text: 'MATLAB Doğrulama Verisi (512 Ham vs 256 FFT)');
-    } catch (e) {
-      debugPrint("Auto-Export Error: $e");
-    }
   }
 
   Future<void> _calculateIsoComfort() async {
@@ -1282,15 +1629,14 @@ class _IsoComfortScreenState extends State<IsoComfortScreen> {
             onPressed: () {
               Navigator.push(
                 context,
-                MaterialPageRoute(
-                    builder: (context) => const SettingsScreen()),
+                MaterialPageRoute(builder: (context) => const SettingsScreen()),
               ).then((_) {
                 // Reload defaults in case the user updated them in Settings.
                 final prefs = SharedPreferences.getInstance();
                 prefs.then((p) {
                   if (!mounted) return;
-                  _vehicleInfoController.text =
-                      p.getString(kPrefVehicleInfo) ?? _vehicleInfoController.text;
+                  _vehicleInfoController.text = p.getString(kPrefVehicleInfo) ??
+                      _vehicleInfoController.text;
                   _tireInfoController.text =
                       p.getString(kPrefTireInfo) ?? _tireInfoController.text;
                 });
@@ -1401,10 +1747,12 @@ class _IsoComfortScreenState extends State<IsoComfortScreen> {
                 ),
                 const SizedBox(height: 16),
                 // Phase 3: hazard proximity warning (only visible when active).
+                /*
                 if (_isHazardWarningActive) ...[
                   _buildHazardWarning(),
                   const SizedBox(height: 16),
                 ],
+                */
                 Expanded(
                   flex: 2,
                   child: _GlassCard(
@@ -1574,6 +1922,8 @@ class _IsoComfortScreenState extends State<IsoComfortScreen> {
                           Expanded(
                             child: LineChart(
                               LineChartData(
+                                clipData: const FlClipData
+                                    .all(), // GRAFİK TAŞMASINI ENGELLER
                                 minY: 0,
                                 maxY: 10,
                                 minX: minX,

@@ -2,7 +2,9 @@ import 'dart:async';
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:path_provider/path_provider.dart';
+
 import 'iso_comfort_screen.dart';
+import 'main.dart'; // SiriGlobalState'e erişmek için eklendi
 
 class SplashScreen extends StatefulWidget {
   const SplashScreen({super.key});
@@ -11,9 +13,12 @@ class SplashScreen extends StatefulWidget {
   State<SplashScreen> createState() => _SplashScreenState();
 }
 
-class _SplashScreenState extends State<SplashScreen> with SingleTickerProviderStateMixin {
+class _SplashScreenState extends State<SplashScreen>
+    with SingleTickerProviderStateMixin {
   late AnimationController _pulseController;
   late Animation<double> _pulseAnimation;
+
+  Timer? _splashTimer;
 
   @override
   void initState() {
@@ -25,23 +30,35 @@ class _SplashScreenState extends State<SplashScreen> with SingleTickerProviderSt
     _pulseAnimation = Tween<double>(begin: 0.2, end: 1.0).animate(
         CurvedAnimation(parent: _pulseController, curve: Curves.easeInOut));
 
-    // Fire-and-forget: clean up stale CSV files in the background.
-    // Runs concurrently with the 3-second splash delay so it costs nothing.
     _cleanOldCsvFiles();
 
-    Future.delayed(const Duration(seconds: 3), () {
-      if (mounted) {
-        Navigator.of(context).pushReplacement(
-          MaterialPageRoute(builder: (context) => const IsoComfortScreen()),
-        );
-      }
-    });
+    // 1. NORMAL AÇILIŞ (Eğer Siri yoksa 3 saniye bekle)
+    _splashTimer = Timer(const Duration(seconds: 3), _goNext);
+
+    // 2. SIRI GELDİ Mİ KONTROLÜ (Siri algılanırsa 3 saniyeyi iptal et ve anında geç)
+    if (SiriGlobalState.siriIntentNotifier.value != null) {
+      _splashTimer?.cancel();
+      WidgetsBinding.instance.addPostFrameCallback((_) => _goNext());
+    } else {
+      SiriGlobalState.siriIntentNotifier.addListener(_siriListener);
+    }
   }
 
-  /// Deletes `machine_data_*.csv` files from the system temporary directory
-  /// that are older than 7 days. Each completed test produces one such file;
-  /// without cleanup they accumulate indefinitely and inflate the app's
-  /// on-device storage footprint — a common App Store review red flag.
+  void _siriListener() {
+    if (SiriGlobalState.siriIntentNotifier.value != null) {
+      _splashTimer?.cancel();
+      _goNext();
+    }
+  }
+
+  void _goNext() {
+    if (mounted) {
+      Navigator.of(context).pushReplacement(
+        MaterialPageRoute(builder: (context) => const IsoComfortScreen()),
+      );
+    }
+  }
+
   Future<void> _cleanOldCsvFiles() async {
     try {
       final Directory tempDir = await getTemporaryDirectory();
@@ -58,13 +75,14 @@ class _SplashScreenState extends State<SplashScreen> with SingleTickerProviderSt
         }
       }
     } catch (e) {
-      // GC is best-effort; a failure here must never interrupt the splash flow.
       debugPrint('CSV GC error: $e');
     }
   }
 
   @override
   void dispose() {
+    _splashTimer?.cancel();
+    SiriGlobalState.siriIntentNotifier.removeListener(_siriListener);
     _pulseController.dispose();
     super.dispose();
   }
@@ -81,7 +99,7 @@ class _SplashScreenState extends State<SplashScreen> with SingleTickerProviderSt
               'assets/app_icon.png',
               width: 140,
               height: 140,
-              errorBuilder: (context, error, stackTrace) => 
+              errorBuilder: (context, error, stackTrace) =>
                   const Icon(Icons.speed, size: 120, color: Colors.greenAccent),
             ),
             const SizedBox(height: 32),
@@ -90,14 +108,13 @@ class _SplashScreenState extends State<SplashScreen> with SingleTickerProviderSt
               child: const Text(
                 'RIDE COMFORT',
                 style: TextStyle(
-                  fontSize: 28,
-                  fontWeight: FontWeight.w900,
-                  color: Colors.greenAccent,
-                  letterSpacing: 4.0,
-                  shadows: [
-                    Shadow(color: Colors.greenAccent, blurRadius: 10),
-                  ]
-                ),
+                    fontSize: 28,
+                    fontWeight: FontWeight.w900,
+                    color: Colors.greenAccent,
+                    letterSpacing: 4.0,
+                    shadows: [
+                      Shadow(color: Colors.greenAccent, blurRadius: 10),
+                    ]),
               ),
             ),
           ],

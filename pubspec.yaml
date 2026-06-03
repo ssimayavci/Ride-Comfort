@@ -55,6 +55,7 @@ dependencies:
   wakelock_plus: ^1.3.0
   flutter_tts: ^4.2.0
   shared_preferences: ^2.3.2
+  flutter_siri_suggestions: ^2.1.0
 
 dev_dependencies:
   flutter_test:

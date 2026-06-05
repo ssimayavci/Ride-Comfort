@@ -485,7 +485,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
                 const SizedBox(height: 28),
 
-                // ── Section: Siri Integration (Yeni Eklenen Bölüm) ────────────
+                // ── Section: Siri Integration (Sadeleştirilmiş) ────────────
                 _sectionLabel(Icons.mic_none, 'SESLİ KOMUTLAR'),
                 const SizedBox(height: 12),
                 _GlassCard(
@@ -496,157 +496,15 @@ class _SettingsScreenState extends State<SettingsScreen> {
                         color: Colors.greenAccent.withOpacity(0.1),
                         borderRadius: BorderRadius.circular(8),
                       ),
-                      child: const Icon(Icons.mic,
+                      child: const Icon(Icons.record_voice_over,
                           color: Colors.greenAccent, size: 20),
                     ),
-                    title: const Text("Siri ile Kontrol Rehberi",
+                    title: const Text("Sesli Komutlar Etkin",
                         style: TextStyle(
                             color: Colors.white, fontWeight: FontWeight.bold)),
                     subtitle: const Text(
-                        "Testi sesli komutla başlatıp bitirebilirsin.",
+                        "Sadece 'Hey Siri, Ride Comfort testi başlat' veya 'Hey Siri, Ride Comfort testi bitir' demen yeterli.",
                         style: TextStyle(color: Colors.blueGrey, fontSize: 11)),
-                    trailing:
-                        const Icon(Icons.chevron_right, color: Colors.blueGrey),
-                    onTap: () {
-                      showDialog(
-                        context: context,
-                        builder: (ctx) => Dialog(
-                          backgroundColor: Colors.transparent,
-                          insetPadding: const EdgeInsets.symmetric(
-                              horizontal: 16, vertical: 24),
-                          child: _GlassCard(
-                            borderGlow: Colors.greenAccent.withOpacity(0.3),
-                            child: Padding(
-                              padding: const EdgeInsets.all(20.0),
-                              child: SingleChildScrollView(
-                                child: Column(
-                                  mainAxisSize: MainAxisSize.min,
-                                  crossAxisAlignment: CrossAxisAlignment.start,
-                                  children: [
-                                    Row(
-                                      children: [
-                                        const Icon(
-                                            Icons.mic_external_on_rounded,
-                                            color: Colors.greenAccent,
-                                            size: 24),
-                                        const SizedBox(width: 10),
-                                        const Expanded(
-                                          child: Text(
-                                            'SİRİ KULLANIM REHBERİ',
-                                            style: TextStyle(
-                                                color: Colors.white,
-                                                fontWeight: FontWeight.bold,
-                                                fontSize: 14,
-                                                letterSpacing: 1.5),
-                                          ),
-                                        ),
-                                        GestureDetector(
-                                          onTap: () => Navigator.pop(ctx),
-                                          child: const Icon(Icons.close,
-                                              color: Colors.blueGrey, size: 22),
-                                        ),
-                                      ],
-                                    ),
-                                    const SizedBox(height: 16),
-                                    Divider(
-                                        color: Colors.blueGrey.withOpacity(0.4),
-                                        height: 1),
-                                    const SizedBox(height: 16),
-
-                                    // Adım 1
-                                    const Text('⚠️ Önemli Ön Bilgi',
-                                        style: TextStyle(
-                                            color: Colors.orangeAccent,
-                                            fontWeight: FontWeight.bold,
-                                            fontSize: 12)),
-                                    const SizedBox(height: 4),
-                                    const Text(
-                                        'Sesli komutların çalışması için telefonunuzun Siri dilinin Türkçe olması gerekmektedir.',
-                                        style: TextStyle(
-                                            color: Colors.blueGrey,
-                                            fontSize: 11.5,
-                                            height: 1.5)),
-                                    const SizedBox(height: 16),
-
-                                    // Adım 2
-                                    const Text('Adım 1: Sistemi Tanıtma',
-                                        style: TextStyle(
-                                            color: Colors.white,
-                                            fontWeight: FontWeight.bold,
-                                            fontSize: 12)),
-                                    const SizedBox(height: 4),
-                                    const Text(
-                                        'Uygulamayı yükledikten sonra ana ekrandaki "Testi Başlat" ve "Testi Bitir" butonlarına manuel olarak en az bir kez basmalısınız.',
-                                        style: TextStyle(
-                                            color: Colors.blueGrey,
-                                            fontSize: 11.5,
-                                            height: 1.5)),
-                                    const SizedBox(height: 16),
-
-                                    // Adım 3
-                                    const Text('Adım 2: Kestirmelere Ekleme',
-                                        style: TextStyle(
-                                            color: Colors.white,
-                                            fontWeight: FontWeight.bold,
-                                            fontSize: 12)),
-                                    const SizedBox(height: 4),
-                                    const Text(
-                                        "• iPhone'unuzda Kestirmeler (Shortcuts) uygulamasını açın.\n"
-                                        '• Sağ üst köşedeki "+" butonuna dokunun.\n'
-                                        "• İşlem Ekle > Uygulamalar sekmesine geçin ve Ride Comfort'u seçin."
-                                        '• Açılan listeden "Testi Başlat" eylemini seçin.\n'
-                                        "• Ekranın en üstünde yazan kestirme adına dokunun ve ismini tam olarak Testi başlat olarak değiştirip kaydedin. (Aynı işlemi 'Testi bitir' için de yapabilirsiniz).\n",
-                                        style: TextStyle(
-                                            color: Colors.blueGrey,
-                                            fontSize: 11.5,
-                                            height: 1.5)),
-                                    const SizedBox(height: 16),
-
-                                    // Adım 4
-                                    Container(
-                                      width: double.infinity,
-                                      padding: const EdgeInsets.all(12),
-                                      decoration: BoxDecoration(
-                                        color:
-                                            Colors.greenAccent.withOpacity(0.1),
-                                        borderRadius: BorderRadius.circular(8),
-                                        border: Border.all(
-                                            color: Colors.greenAccent
-                                                .withOpacity(0.3)),
-                                      ),
-                                      child: const Column(
-                                        children: [
-                                          Icon(Icons.record_voice_over,
-                                              color: Colors.greenAccent,
-                                              size: 24),
-                                          SizedBox(height: 8),
-                                          Text(
-                                            'Artık Hazırsınız!',
-                                            style: TextStyle(
-                                                color: Colors.greenAccent,
-                                                fontWeight: FontWeight.bold,
-                                                fontSize: 12),
-                                          ),
-                                          SizedBox(height: 4),
-                                          Text(
-                                            '"Hey Siri, testi başlat" veya "Hey Siri, testi bitir" diyerek sürüş konforunuzu ölçmeye başlayabilirsiniz.',
-                                            textAlign: TextAlign.center,
-                                            style: TextStyle(
-                                                color: Colors.white,
-                                                fontStyle: FontStyle.italic,
-                                                fontSize: 11),
-                                          ),
-                                        ],
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                              ),
-                            ),
-                          ),
-                        ),
-                      );
-                    },
                   ),
                 ),
 

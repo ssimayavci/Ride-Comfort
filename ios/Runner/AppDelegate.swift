@@ -1,59 +1,39 @@
-import Flutter
 import UIKit
+import Flutter
 
-@main
+@UIApplicationMain
 @objc class AppDelegate: FlutterAppDelegate {
-
-  private var pendingActivityType: String?
-  private var siriChannel: FlutterMethodChannel?
+  
+  // Siri'den gelen komutu Flutter uyanana kadar hafızada tutmak için
+  var pendingSiriIntent: String?
 
   override func application(
     _ application: UIApplication,
     didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?
   ) -> Bool {
-    
-    // 🚨 CLAUDE'UN SİLDİĞİ ANA ŞALTER! Bu olmadan hiçbir eklenti (TTS, Sqflite vs.) çalışmaz.
-    GeneratedPluginRegistrant.register(with: self)
-    
-    // 2. KESİN ÇÖZÜM (Ekranı beklemeden direkt motora bağlanan kanal)
-    if let registrar = self.registrar(forPlugin: "SiriIntentBridge") {
-        let messenger = registrar.messenger()
-        
-        siriChannel = FlutterMethodChannel(
-            name: "com.emir.konforolcer/siri",
-            binaryMessenger: messenger
-        )
-        
-        siriChannel?.setMethodCallHandler { [weak self] call, flutterResult in
-            if call.method == "getInitialIntent" {
-                flutterResult(self?.pendingActivityType)
-                self?.pendingActivityType = nil
-            } else {
-                flutterResult(FlutterMethodNotImplemented)
-            }
+      
+    let controller : FlutterViewController = window?.rootViewController as! FlutterViewController
+    let siriChannel = FlutterMethodChannel(name: "com.emir.konforolcer/siri", binaryMessenger: controller.binaryMessenger)
+      
+    // 1. PULL: Flutter'ın "Bekleyen komut var mı?" sorusuna cevap veren kısım
+    siriChannel.setMethodCallHandler { (call: FlutterMethodCall, result: @escaping FlutterResult) in
+        if call.method == "getInitialIntent" {
+            result(self.pendingSiriIntent)
+            self.pendingSiriIntent = nil // Okuduktan sonra hafızayı temizle
+        } else {
+            result(FlutterMethodNotImplemented)
         }
     }
-    
+      
+    // 2. PUSH: Siri App Intents tetiklendiğinde çalışan kısım
+    NotificationCenter.default.addObserver(forName: Notification.Name("TriggerSiriIntent"), object: nil, queue: .main) { notification in
+        if let intentStr = notification.object as? String {
+            self.pendingSiriIntent = intentStr // Flutter kapalıysa diye hafızaya al
+            siriChannel.invokeMethod("onSiriIntent", arguments: intentStr) // Flutter açıksa anında ilet
+        }
+    }
+
+    GeneratedPluginRegistrant.register(with: self)
     return super.application(application, didFinishLaunchingWithOptions: launchOptions)
-  }
-
-  override func application(
-    _ application: UIApplication,
-    continue userActivity: NSUserActivity,
-    restorationHandler: @escaping ([UIUserActivityRestoring]?) -> Void
-  ) -> Bool {
-
-    let activityType = userActivity.activityType
-    print("🔥 NATIVE iOS YAKALADI: \(activityType ?? "Bilinmiyor")")
-
-    pendingActivityType = activityType
-    siriChannel?.invokeMethod("onSiriIntent", arguments: activityType)
-
-    var enrichedInfo: [AnyHashable: Any] = userActivity.userInfo ?? [:]
-    enrichedInfo["activityType"] = activityType
-    userActivity.userInfo = enrichedInfo
-
-    restorationHandler(nil)
-    return true
   }
 }

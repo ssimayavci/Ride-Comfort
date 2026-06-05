@@ -28,6 +28,10 @@
     <true/>
     <key>NSLocationWhenInUseUsageDescription</key>
     <string>Ride Comfort uses your location while the app is open to map your route, calculate trip distance, and geo-tag road anomalies such as potholes and speed bumps. Your location data is stored only on this device and is never shared.</string>
+    <key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
+    <string>Sürüş testi sırasında aracın anlık hızını ve yol üzerindeki sarsıntıları daha hassas analiz edebilmek için konum verilerine sürekli erişim gereklidir.</string>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Siri sesli komutlarını işleyebilmek ve sürüş testi sırasında eller serbest kontrol sağlamak için mikrofon erişimine ihtiyaç duyulmaktadır.</string>
     <key>NSSiriUsageDescription</key>
     <string>Siri, "Konfor testi başlat" veya "Konfor testi bitir" komutlarıyla uygulamayı eller serbest kontrol edebilmeniz için kullanılır.</string>
     <key>NSUserActivityTypes</key>

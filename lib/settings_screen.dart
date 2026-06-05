@@ -208,8 +208,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
           content: const Text('Tüm bozuk zemin verileri silindi.'),
           backgroundColor: const Color(0xFF1E293B),
           behavior: SnackBarBehavior.floating,
-          shape:
-              RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
         ),
       );
     }
@@ -220,8 +219,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       context: context,
       builder: (ctx) => Dialog(
         backgroundColor: Colors.transparent,
-        insetPadding:
-            const EdgeInsets.symmetric(horizontal: 16, vertical: 24),
+        insetPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 24),
         child: _GlassCard(
           borderGlow: Colors.blueAccent.withOpacity(0.4),
           child: Padding(
@@ -253,8 +251,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   ],
                 ),
                 const SizedBox(height: 12),
-                Divider(
-                    color: Colors.blueGrey.withOpacity(0.4), height: 1),
+                Divider(color: Colors.blueGrey.withOpacity(0.4), height: 1),
                 const SizedBox(height: 4),
                 // Scrollable body
                 Flexible(
@@ -266,8 +263,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                         _policySection('🇹🇷  Türkçe', _privacyTr),
                         const SizedBox(height: 20),
                         Divider(
-                            color: Colors.blueGrey.withOpacity(0.3),
-                            height: 1),
+                            color: Colors.blueGrey.withOpacity(0.3), height: 1),
                         const SizedBox(height: 20),
                         _policySection('🇬🇧  English', _privacyEn),
                         const SizedBox(height: 8),
@@ -326,13 +322,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
         ),
         child: SafeArea(
           child: SingleChildScrollView(
-            padding:
-                const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
                 // ── Section: Default Parameters ───────────────────────────
-                _sectionLabel(Icons.tune_outlined, 'VARSAYILAN TEST PARAMETRELERİ'),
+                _sectionLabel(
+                    Icons.tune_outlined, 'VARSAYILAN TEST PARAMETRELERİ'),
                 const SizedBox(height: 12),
                 _GlassCard(
                   child: Padding(
@@ -462,8 +458,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
                         ),
                         const SizedBox(height: 16),
                         OutlinedButton.icon(
-                          icon: const Icon(Icons.delete_sweep_outlined,
-                              size: 16),
+                          icon:
+                              const Icon(Icons.delete_sweep_outlined, size: 16),
                           label: const Text(
                             'TEHLİKE ÖNBELLEĞİNİ TEMİZLE',
                             style: TextStyle(
@@ -475,8 +471,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                             foregroundColor: Colors.redAccent,
                             side: BorderSide(
                                 color: Colors.redAccent.withOpacity(0.4)),
-                            padding:
-                                const EdgeInsets.symmetric(vertical: 13),
+                            padding: const EdgeInsets.symmetric(vertical: 13),
                             shape: RoundedRectangleBorder(
                                 borderRadius: BorderRadius.circular(8)),
                           ),
@@ -485,6 +480,173 @@ class _SettingsScreenState extends State<SettingsScreen> {
                         ),
                       ],
                     ),
+                  ),
+                ),
+
+                const SizedBox(height: 28),
+
+                // ── Section: Siri Integration (Yeni Eklenen Bölüm) ────────────
+                _sectionLabel(Icons.mic_none, 'SESLİ KOMUTLAR'),
+                const SizedBox(height: 12),
+                _GlassCard(
+                  child: ListTile(
+                    leading: Container(
+                      padding: const EdgeInsets.all(8),
+                      decoration: BoxDecoration(
+                        color: Colors.greenAccent.withOpacity(0.1),
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: const Icon(Icons.mic,
+                          color: Colors.greenAccent, size: 20),
+                    ),
+                    title: const Text("Siri ile Kontrol Rehberi",
+                        style: TextStyle(
+                            color: Colors.white, fontWeight: FontWeight.bold)),
+                    subtitle: const Text(
+                        "Testi sesli komutla başlatıp bitirebilirsin.",
+                        style: TextStyle(color: Colors.blueGrey, fontSize: 11)),
+                    trailing:
+                        const Icon(Icons.chevron_right, color: Colors.blueGrey),
+                    onTap: () {
+                      showDialog(
+                        context: context,
+                        builder: (ctx) => Dialog(
+                          backgroundColor: Colors.transparent,
+                          insetPadding: const EdgeInsets.symmetric(
+                              horizontal: 16, vertical: 24),
+                          child: _GlassCard(
+                            borderGlow: Colors.greenAccent.withOpacity(0.3),
+                            child: Padding(
+                              padding: const EdgeInsets.all(20.0),
+                              child: SingleChildScrollView(
+                                child: Column(
+                                  mainAxisSize: MainAxisSize.min,
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Row(
+                                      children: [
+                                        const Icon(
+                                            Icons.mic_external_on_rounded,
+                                            color: Colors.greenAccent,
+                                            size: 24),
+                                        const SizedBox(width: 10),
+                                        const Expanded(
+                                          child: Text(
+                                            'SİRİ KULLANIM REHBERİ',
+                                            style: TextStyle(
+                                                color: Colors.white,
+                                                fontWeight: FontWeight.bold,
+                                                fontSize: 14,
+                                                letterSpacing: 1.5),
+                                          ),
+                                        ),
+                                        GestureDetector(
+                                          onTap: () => Navigator.pop(ctx),
+                                          child: const Icon(Icons.close,
+                                              color: Colors.blueGrey, size: 22),
+                                        ),
+                                      ],
+                                    ),
+                                    const SizedBox(height: 16),
+                                    Divider(
+                                        color: Colors.blueGrey.withOpacity(0.4),
+                                        height: 1),
+                                    const SizedBox(height: 16),
+
+                                    // Adım 1
+                                    const Text('⚠️ Önemli Ön Bilgi',
+                                        style: TextStyle(
+                                            color: Colors.orangeAccent,
+                                            fontWeight: FontWeight.bold,
+                                            fontSize: 12)),
+                                    const SizedBox(height: 4),
+                                    const Text(
+                                        'Sesli komutların çalışması için telefonunuzun Siri dilinin Türkçe olması gerekmektedir.',
+                                        style: TextStyle(
+                                            color: Colors.blueGrey,
+                                            fontSize: 11.5,
+                                            height: 1.5)),
+                                    const SizedBox(height: 16),
+
+                                    // Adım 2
+                                    const Text('Adım 1: Sistemi Tanıtma',
+                                        style: TextStyle(
+                                            color: Colors.white,
+                                            fontWeight: FontWeight.bold,
+                                            fontSize: 12)),
+                                    const SizedBox(height: 4),
+                                    const Text(
+                                        'Uygulamayı yükledikten sonra ana ekrandaki "Testi Başlat" ve "Testi Bitir" butonlarına manuel olarak en az bir kez basmalısınız.',
+                                        style: TextStyle(
+                                            color: Colors.blueGrey,
+                                            fontSize: 11.5,
+                                            height: 1.5)),
+                                    const SizedBox(height: 16),
+
+                                    // Adım 3
+                                    const Text('Adım 2: Kestirmelere Ekleme',
+                                        style: TextStyle(
+                                            color: Colors.white,
+                                            fontWeight: FontWeight.bold,
+                                            fontSize: 12)),
+                                    const SizedBox(height: 4),
+                                    const Text(
+                                        "• iPhone'unuzda Kestirmeler (Shortcuts) uygulamasını açın.\n"
+                                        '• Sağ üst köşedeki "+" butonuna dokunun.\n'
+                                        "• İşlem Ekle > Uygulamalar sekmesine geçin ve Ride Comfort'u seçin."
+                                        '• Açılan listeden "Testi Başlat" eylemini seçin.\n'
+                                        "• Ekranın en üstünde yazan kestirme adına dokunun ve ismini tam olarak Testi başlat olarak değiştirip kaydedin. (Aynı işlemi 'Testi bitir' için de yapabilirsiniz).\n",
+                                        style: TextStyle(
+                                            color: Colors.blueGrey,
+                                            fontSize: 11.5,
+                                            height: 1.5)),
+                                    const SizedBox(height: 16),
+
+                                    // Adım 4
+                                    Container(
+                                      width: double.infinity,
+                                      padding: const EdgeInsets.all(12),
+                                      decoration: BoxDecoration(
+                                        color:
+                                            Colors.greenAccent.withOpacity(0.1),
+                                        borderRadius: BorderRadius.circular(8),
+                                        border: Border.all(
+                                            color: Colors.greenAccent
+                                                .withOpacity(0.3)),
+                                      ),
+                                      child: const Column(
+                                        children: [
+                                          Icon(Icons.record_voice_over,
+                                              color: Colors.greenAccent,
+                                              size: 24),
+                                          SizedBox(height: 8),
+                                          Text(
+                                            'Artık Hazırsınız!',
+                                            style: TextStyle(
+                                                color: Colors.greenAccent,
+                                                fontWeight: FontWeight.bold,
+                                                fontSize: 12),
+                                          ),
+                                          SizedBox(height: 4),
+                                          Text(
+                                            '"Hey Siri, testi başlat" veya "Hey Siri, testi bitir" diyerek sürüş konforunuzu ölçmeye başlayabilirsiniz.',
+                                            textAlign: TextAlign.center,
+                                            style: TextStyle(
+                                                color: Colors.white,
+                                                fontStyle: FontStyle.italic,
+                                                fontSize: 11),
+                                          ),
+                                        ],
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ),
+                          ),
+                        ),
+                      );
+                    },
                   ),
                 ),
 
@@ -509,8 +671,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                               color: Colors.blueAccent.withOpacity(0.1),
                               borderRadius: BorderRadius.circular(8),
                               border: Border.all(
-                                  color:
-                                      Colors.blueAccent.withOpacity(0.3)),
+                                  color: Colors.blueAccent.withOpacity(0.3)),
                             ),
                             child: const Icon(Icons.privacy_tip_outlined,
                                 color: Colors.blueAccent, size: 18),
@@ -528,8 +689,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                                 SizedBox(height: 2),
                                 Text('Privacy Policy',
                                     style: TextStyle(
-                                        color: Colors.blueGrey,
-                                        fontSize: 11)),
+                                        color: Colors.blueGrey, fontSize: 11)),
                               ],
                             ),
                           ),
@@ -595,9 +755,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   Widget _fieldLabel(String text) {
     return Text(text,
         style: const TextStyle(
-            color: Colors.blueGrey,
-            fontSize: 11,
-            fontWeight: FontWeight.bold));
+            color: Colors.blueGrey, fontSize: 11, fontWeight: FontWeight.bold));
   }
 
   Widget _inputField({
@@ -641,8 +799,7 @@ class _GlassCard extends StatelessWidget {
   final Widget child;
   final Color borderGlow;
 
-  const _GlassCard(
-      {required this.child, this.borderGlow = Colors.transparent});
+  const _GlassCard({required this.child, this.borderGlow = Colors.transparent});
 
   @override
   Widget build(BuildContext context) {

@@ -486,19 +486,24 @@ class _IsoComfortScreenState extends State<IsoComfortScreen> {
 
   void _handleSiriIntent(String? intent) {
     if (intent == null) return;
-    // Consume the intent immediately by resetting to null.
+    // Niyeti hemen tüket ki tekrar tekrar tetiklenmesin
     SiriGlobalState.siriIntentNotifier.value = null;
 
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (intent == _kSiriStartTest && !_isRunning) {
-        debugPrint("🟢 Global'den start emri geldi, test başlatılıyor!");
-        // ── STEP 2: Mark that this test was triggered hands-free via Siri.
-        _startedViaSiri = true;
-        _startTest();
-      } else if (intent == _kSiriStopTest && _isRunning) {
-        debugPrint("🔴 Global'den stop emri geldi, test durduruluyor!");
-        _stopTest();
-      }
+      // SİHİRLİ DOKUNUŞ: Siri'nin uygulamayı tam olarak ön plana alması ve
+      // Flutter motorunun uyanması için 1 saniye (1000 ms) nefes aldırıyoruz.
+      Future.delayed(const Duration(milliseconds: 1000), () {
+        if (intent == _kSiriStartTest && !_isRunning) {
+          debugPrint("🟢 Global'den start emri geldi, test başlatılıyor!");
+          setState(() {
+            _startedViaSiri = true;
+          });
+          _startTest();
+        } else if (intent == _kSiriStopTest && _isRunning) {
+          debugPrint("🔴 Global'den stop emri geldi, test durduruluyor!");
+          _stopTest();
+        }
+      });
     });
   }
 
@@ -574,9 +579,11 @@ class _IsoComfortScreenState extends State<IsoComfortScreen> {
   /// [_kSiriStopTest], plus any [userInfo] that was set at registration time.
   Future<void> _initSiriShortcuts() async {
     try {
-      // Registering without a prior user interaction seeds Siri's index...
-      FlutterSiriSuggestions.instance.registerActivity(_startActivity);
-      FlutterSiriSuggestions.instance.registerActivity(_stopActivity);
+      // 1. Önce Start'ın iOS sistemine işlenmesini ve Kestirmelere yazılmasını BEKLE
+      await FlutterSiriSuggestions.instance.registerActivity(_startActivity);
+
+      // 2. İşlem bitince Stop'u gönder
+      await FlutterSiriSuggestions.instance.registerActivity(_stopActivity);
     } catch (e) {
       debugPrint('Siri init error: $e');
     }
@@ -897,7 +904,7 @@ class _IsoComfortScreenState extends State<IsoComfortScreen> {
     // Donate to Siri: reinforces the usage pattern so iOS learns to suggest
     // "start test" proactively (e.g. on lock screen at the user's usual
     // drive time). Fire-and-forget — must not block the sensor pipeline.
-    unawaited(FlutterSiriSuggestions.instance.registerActivity(_startActivity));
+    await (FlutterSiriSuggestions.instance.registerActivity(_startActivity));
 
     _fetchLocationAndStartStream();
 
@@ -1085,7 +1092,7 @@ class _IsoComfortScreenState extends State<IsoComfortScreen> {
 
     // Donate to Siri: iOS learns to suggest "stop test" once the user has
     // an active session.  Fire-and-forget — CSV is already closed above.
-    unawaited(FlutterSiriSuggestions.instance.registerActivity(_stopActivity));
+    await (FlutterSiriSuggestions.instance.registerActivity(_stopActivity));
 
     // Route based on how the test was started:
     //   Siri  → post-test dialog so the driver can fill in vehicle info
@@ -1950,9 +1957,32 @@ class _IsoComfortScreenState extends State<IsoComfortScreen> {
                                       ),
                                     ),
                                   ),
-                                  bottomTitles: const AxisTitles(
-                                      sideTitles:
-                                          SideTitles(showTitles: false)),
+                                  bottomTitles: AxisTitles(
+                                    sideTitles: SideTitles(
+                                      showTitles: true,
+                                      reservedSize: 24,
+                                      interval:
+                                          10, // Her 10 saniyede bir etiket gösterir (grafik kalabalık olmasın diye)
+                                      getTitlesWidget: (value, meta) {
+                                        // Grafiğin en başı ve en sonundaki sayıları gizle ki kenarlara taşıp çirkin durmasın
+                                        if (value == meta.max ||
+                                            value == meta.min) {
+                                          return const SizedBox.shrink();
+                                        }
+                                        return Padding(
+                                          padding:
+                                              const EdgeInsets.only(top: 8.0),
+                                          child: Text(
+                                            '${value.toInt()}s', // Ekrana "10s", "20s" şeklinde yazar
+                                            style: TextStyle(
+                                                color: Colors.blueGrey.shade400,
+                                                fontSize: 10,
+                                                fontWeight: FontWeight.bold),
+                                          ),
+                                        );
+                                      },
+                                    ),
+                                  ),
                                   rightTitles: const AxisTitles(
                                       sideTitles:
                                           SideTitles(showTitles: false)),

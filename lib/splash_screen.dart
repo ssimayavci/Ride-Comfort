@@ -33,7 +33,7 @@ class _SplashScreenState extends State<SplashScreen>
     _cleanOldCsvFiles();
 
     // 1. NORMAL AÇILIŞ (Eğer Siri yoksa 3 saniye bekle)
-    _splashTimer = Timer(const Duration(seconds: 1), _goNext);
+    _splashTimer = Timer(const Duration(seconds: 3), _goNext);
 
     // 2. SIRI GELDİ Mİ KONTROLÜ (Siri algılanırsa 3 saniyeyi iptal et ve anında geç)
     if (SiriGlobalState.siriIntentNotifier.value != null) {

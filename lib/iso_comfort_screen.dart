@@ -589,6 +589,99 @@ class _IsoComfortScreenState extends State<IsoComfortScreen> {
     }
   }
 
+  // ── ADD TO SIRI ────────────────────────────────────────────────────────────
+  // Shares the same MethodChannel as the intent bridge (channels are identified
+  // by name; multiple Dart handles to the same name are all equivalent).
+  static const _siriMethodChannel = MethodChannel('com.emir.konforolcer/siri');
+
+  /// Presents the native iOS voice-shortcut sheet for [activityType].
+  /// If the user has already recorded a phrase, shows the edit sheet instead.
+  Future<void> _addToSiri(String activityType) async {
+    try {
+      await _siriMethodChannel.invokeMethod('addToSiri', activityType);
+    } catch (e) {
+      debugPrint('Add-to-Siri error: $e');
+    }
+  }
+
+  void _showAddToSiriDialog() {
+    showDialog(
+      context: context,
+      builder: (context) => Dialog(
+        backgroundColor: Colors.transparent,
+        child: _GlassCard(
+          borderGlow: Colors.greenAccent.withOpacity(0.4),
+          child: Padding(
+            padding: const EdgeInsets.all(24.0),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                const Text(
+                  'SİRİ\'YE EKLE',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    fontSize: 18,
+                    fontWeight: FontWeight.bold,
+                    color: Colors.white,
+                    letterSpacing: 1.5,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                const Text(
+                  'Her kısayol için Siri\'ye kişisel sesli komutunuzu kaydedin.',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(color: Colors.blueGrey, fontSize: 12),
+                ),
+                const SizedBox(height: 24),
+                ElevatedButton.icon(
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.greenAccent.withOpacity(0.15),
+                    foregroundColor: Colors.greenAccent,
+                    padding: const EdgeInsets.symmetric(vertical: 14),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(8),
+                      side: BorderSide(
+                          color: Colors.greenAccent.withOpacity(0.4)),
+                    ),
+                  ),
+                  onPressed: () => _addToSiri(_kSiriStartTest),
+                  icon: const Icon(Icons.mic, size: 18),
+                  label: const Text('"Testi Başlat" — Siri\'ye Ekle',
+                      style: TextStyle(fontWeight: FontWeight.bold)),
+                ),
+                const SizedBox(height: 12),
+                ElevatedButton.icon(
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.greenAccent.withOpacity(0.15),
+                    foregroundColor: Colors.greenAccent,
+                    padding: const EdgeInsets.symmetric(vertical: 14),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(8),
+                      side: BorderSide(
+                          color: Colors.greenAccent.withOpacity(0.4)),
+                    ),
+                  ),
+                  onPressed: () => _addToSiri(_kSiriStopTest),
+                  icon: const Icon(Icons.mic_off_outlined, size: 18),
+                  label: const Text('"Testi Bitir" — Siri\'ye Ekle',
+                      style: TextStyle(fontWeight: FontWeight.bold)),
+                ),
+                const SizedBox(height: 16),
+                TextButton(
+                  onPressed: () => Navigator.pop(context),
+                  child: const Text('KAPAT',
+                      style: TextStyle(
+                          color: Colors.blueGrey, fontWeight: FontWeight.bold)),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
   /// Called on every GPS position update while a test is running.
   ///
   /// Scans [_globalHazards] with [Geolocator.distanceBetween] (no
@@ -1630,6 +1723,11 @@ class _IsoComfortScreenState extends State<IsoComfortScreen> {
         centerTitle: true,
         iconTheme: const IconThemeData(color: Colors.white),
         actions: [
+          IconButton(
+            icon: const Icon(Icons.mic_none_outlined),
+            tooltip: 'Siri\'ye Ekle',
+            onPressed: _showAddToSiriDialog,
+          ),
           IconButton(
             icon: const Icon(Icons.settings_outlined),
             tooltip: 'Ayarlar',

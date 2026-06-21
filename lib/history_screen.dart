@@ -469,7 +469,8 @@ class _HistoryScreenState extends State<HistoryScreen> {
       "Bitis Boylam",
       "RMS Konfor Skoru",
       "Durum",
-      "Toplam Anomali"
+      "Toplam Anomali",
+      "Kullanıcı Puanı"
     ]);
 
     for (var test in tests) {
@@ -502,6 +503,7 @@ class _HistoryScreenState extends State<HistoryScreen> {
         score.toStringAsFixed(4),
         label,
         test['anomaly_count']?.toString() ?? '0',
+        test['user_rating']?.toString() ?? 'Puan Yok',
       ]);
 
       // O(1) lookup — no extra DB call per test.

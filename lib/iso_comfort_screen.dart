@@ -768,6 +768,79 @@ class _IsoComfortScreenState extends State<IsoComfortScreen> {
                     mainAxisSize: MainAxisSize.min,
                     crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
+                      // ── Phone placement info banner ─────────────────────
+                      Container(
+                        padding: const EdgeInsets.all(12),
+                        decoration: BoxDecoration(
+                          color: Colors.amberAccent.withOpacity(0.1),
+                          borderRadius: BorderRadius.circular(10),
+                          border: Border.all(
+                              color: Colors.amberAccent.withOpacity(0.3)),
+                        ),
+                        child: Row(
+                          crossAxisAlignment: CrossAxisAlignment.center,
+                          children: [
+                            GestureDetector(
+                              onTap: () {
+                                showDialog(
+                                  context: context,
+                                  barrierDismissible: true,
+                                  builder: (_) => Dialog(
+                                    backgroundColor: Colors.transparent,
+                                    insetPadding: const EdgeInsets.all(16),
+                                    child: Stack(
+                                      children: [
+                                        ClipRRect(
+                                          borderRadius:
+                                              BorderRadius.circular(8),
+                                          child: InteractiveViewer(
+                                            child: Image.asset(
+                                              'assets/phone_horizontal.png',
+                                              fit: BoxFit.contain,
+                                            ),
+                                          ),
+                                        ),
+                                        Positioned(
+                                          top: 0,
+                                          right: 0,
+                                          child: IconButton(
+                                            icon: const Icon(Icons.close,
+                                                color: Colors.white),
+                                            onPressed: () =>
+                                                Navigator.pop(context),
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                );
+                              },
+                              child: ClipRRect(
+                                borderRadius: BorderRadius.circular(8),
+                                child: Image.asset(
+                                  'assets/phone_horizontal.png',
+                                  width: 60,
+                                  height: 60,
+                                  fit: BoxFit.cover,
+                                ),
+                              ),
+                            ),
+                            const SizedBox(width: 12),
+                            const Expanded(
+                              child: Text(
+                                'Testi başlatmak için lütfen cihazı koltuğa yatay bir şekilde yerleştirin.',
+                                style: TextStyle(
+                                  color: Colors.amberAccent,
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(height: 16),
+                      // ───────────────────────────────────────────────────
                       const Text(
                         'TEST PARAMETRELERİ',
                         textAlign: TextAlign.center,
@@ -1188,21 +1261,20 @@ class _IsoComfortScreenState extends State<IsoComfortScreen> {
     await (FlutterSiriSuggestions.instance.registerActivity(_stopActivity));
 
     // Route based on how the test was started:
-    //   Siri  → post-test dialog so the driver can fill in vehicle info
-    //   Manual → save immediately and show the SnackBar
+    //   Siri   → post-test dialog (vehicle info + star rating combined)
+    //   Manual → rating-only dialog (vehicle info was entered before the test)
     if (_startedViaSiri) {
       _showPostTestDialog();
     } else {
-      await _saveTestAndFinish();
+      _showRatingOnlyDialog();
     }
   }
 
   // ── STEP 5a: Calculates the final ISO comfort score, persists the session
   // to the database, and shows the completion SnackBar.
-  // Called either directly from _stopTest (manual start) or from the
-  // post-test dialog buttons (Siri start).
-  Future<void> _saveTestAndFinish() async {
-    await _calculateIsoComfort();
+  // [userRating] 1-5 star rating from the post-ride UI; 0 = not rated / skipped.
+  Future<void> _saveTestAndFinish({int userRating = 0}) async {
+    await _calculateIsoComfort(userRating: userRating);
 
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -1265,6 +1337,7 @@ class _IsoComfortScreenState extends State<IsoComfortScreen> {
   // info beforehand. This dialog lets them do it after — or skip entirely.
   void _showPostTestDialog() {
     String tempPlacement = _selectedPhonePlacement;
+    int selectedRating = 0; // 0 = no star chosen yet
 
     showDialog(
       context: context,
@@ -1390,54 +1463,96 @@ class _IsoComfortScreenState extends State<IsoComfortScreen> {
                           ),
                         ),
                       ),
-                      const SizedBox(height: 32),
+                      const SizedBox(height: 24),
+
+                      // ── STAR RATING ───────────────────────────────────────
+                      const Text(
+                        'Sürüş Konfor Puanı',
+                        style: TextStyle(
+                            color: Colors.blueGrey,
+                            fontSize: 12,
+                            fontWeight: FontWeight.bold),
+                      ),
+                      const SizedBox(height: 10),
                       Row(
-                        children: [
-                          Expanded(
-                            child: ElevatedButton(
-                              style: ElevatedButton.styleFrom(
-                                backgroundColor: Colors.white10,
-                                foregroundColor: Colors.white,
-                                padding:
-                                    const EdgeInsets.symmetric(vertical: 16),
-                                shape: RoundedRectangleBorder(
-                                    borderRadius: BorderRadius.circular(8)),
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: List.generate(5, (index) {
+                          final star = index + 1;
+                          return GestureDetector(
+                            onTap: () =>
+                                setDialogState(() => selectedRating = star),
+                            child: Padding(
+                              padding:
+                                  const EdgeInsets.symmetric(horizontal: 5),
+                              child: Icon(
+                                selectedRating >= star
+                                    ? Icons.star_rounded
+                                    : Icons.star_outline_rounded,
+                                color: selectedRating >= star
+                                    ? const Color(0xFFFFD700)
+                                    : Colors.blueGrey,
+                                size: 38,
                               ),
-                              onPressed: () {
-                                Navigator.pop(context);
-                                _saveTestAndFinish();
-                              },
-                              child: const Text('ATLA'),
                             ),
-                          ),
-                          const SizedBox(width: 12),
-                          Expanded(
-                            child: ElevatedButton(
-                              style: ElevatedButton.styleFrom(
-                                backgroundColor:
-                                    Colors.greenAccent.withOpacity(0.2),
-                                foregroundColor: Colors.greenAccent,
-                                padding:
-                                    const EdgeInsets.symmetric(vertical: 16),
-                                shape: RoundedRectangleBorder(
-                                    borderRadius: BorderRadius.circular(8),
-                                    side: BorderSide(
-                                        color: Colors.greenAccent
-                                            .withOpacity(0.5))),
+                          );
+                        }),
+                      ),
+                      const SizedBox(height: 24),
+
+                      // ── BUTTONS ───────────────────────────────────────────
+                      IntrinsicHeight(
+                        child: Row(
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                          children: [
+                            Expanded(
+                              child: ElevatedButton(
+                                style: ElevatedButton.styleFrom(
+                                  backgroundColor: Colors.white10,
+                                  foregroundColor: Colors.white,
+                                  padding:
+                                      const EdgeInsets.symmetric(vertical: 16),
+                                  shape: RoundedRectangleBorder(
+                                      borderRadius: BorderRadius.circular(8)),
+                                ),
+                                onPressed: () {
+                                  Navigator.pop(context);
+                                  // rating 0 = skipped
+                                  _saveTestAndFinish();
+                                },
+                                child: const Text('ATLA'),
                               ),
-                              onPressed: () {
-                                setState(() {
-                                  _selectedPhonePlacement = tempPlacement;
-                                });
-                                Navigator.pop(context);
-                                _saveTestAndFinish();
-                              },
-                              child: const Text('KAYDET',
-                                  style:
-                                      TextStyle(fontWeight: FontWeight.bold)),
                             ),
-                          ),
-                        ],
+                            const SizedBox(width: 12),
+                            Expanded(
+                              flex: 2,
+                              child: ElevatedButton(
+                                style: ElevatedButton.styleFrom(
+                                  backgroundColor:
+                                      Colors.greenAccent.withOpacity(0.2),
+                                  foregroundColor: Colors.greenAccent,
+                                  padding:
+                                      const EdgeInsets.symmetric(vertical: 16),
+                                  shape: RoundedRectangleBorder(
+                                      borderRadius: BorderRadius.circular(8),
+                                      side: BorderSide(
+                                          color: Colors.greenAccent
+                                              .withOpacity(0.5))),
+                                ),
+                                onPressed: () {
+                                  setState(() {
+                                    _selectedPhonePlacement = tempPlacement;
+                                  });
+                                  Navigator.pop(context);
+                                  _saveTestAndFinish(
+                                      userRating: selectedRating);
+                                },
+                                child: const Text('KAYDET',
+                                    style:
+                                        TextStyle(fontWeight: FontWeight.bold)),
+                              ),
+                            ),
+                          ],
+                        ),
                       ),
                     ],
                   ),
@@ -1446,6 +1561,152 @@ class _IsoComfortScreenState extends State<IsoComfortScreen> {
             ),
           );
         });
+      },
+    );
+  }
+
+  // ── RATING-ONLY DIALOG (Manual start path) ───────────────────────────────────
+  // Shown after _stopTest() when _startedViaSiri == false.
+  // Vehicle info was already collected in _showPreTestDialog, so only the
+  // star rating is needed here.
+  void _showRatingOnlyDialog() {
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (BuildContext context) {
+        int selectedRating = 0;
+        return StatefulBuilder(
+          builder: (context, setDialogState) {
+            return Dialog(
+              backgroundColor: Colors
+                  .transparent, // O korkunç yeşil arka planı şeffaf yaptık
+              insetPadding: const EdgeInsets.all(16),
+              child: _GlassCard(
+                borderGlow: Colors.greenAccent
+                    .withOpacity(0.5), // 2. fotoğraftaki o şık yeşil parlama
+                child: Padding(
+                  padding: const EdgeInsets.all(24.0),
+                  child: SingleChildScrollView(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        // ── Header ──────────────────────────────────────────
+                        const Text(
+                          'SÜRÜŞ TAMAMLANDI',
+                          style: TextStyle(
+                            color: Colors.white,
+                            fontSize: 18,
+                            fontWeight: FontWeight.bold,
+                            letterSpacing:
+                                1.5, // 2. fotoğraftaki gibi daha ferah görünüm
+                          ),
+                          textAlign: TextAlign.center,
+                        ),
+                        const SizedBox(height: 8),
+                        const Text(
+                          'Bu sürüşü konfor açısından nasıl buldunuz?',
+                          style:
+                              TextStyle(color: Colors.blueGrey, fontSize: 12),
+                          textAlign: TextAlign.center,
+                        ),
+                        const SizedBox(height: 24),
+
+                        // ── Star rating ─────────────────────────────────────
+                        const Text(
+                          'Sürüş Konfor Puanı',
+                          style: TextStyle(
+                            color: Colors.blueGrey,
+                            fontSize: 12,
+                            fontWeight: FontWeight.bold,
+                          ),
+                          textAlign: TextAlign.center,
+                        ),
+                        const SizedBox(height: 10),
+                        Row(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: List.generate(5, (index) {
+                            final star = index + 1;
+                            return GestureDetector(
+                              onTap: () =>
+                                  setDialogState(() => selectedRating = star),
+                              child: Padding(
+                                padding:
+                                    const EdgeInsets.symmetric(horizontal: 5),
+                                child: Icon(
+                                  selectedRating >= star
+                                      ? Icons.star_rounded
+                                      : Icons.star_outline_rounded,
+                                  color: selectedRating >= star
+                                      ? const Color(
+                                          0xFFFFD700) // Orijinal sarı yıldız rengi
+                                      : Colors.blueGrey.withOpacity(0.5),
+                                  size: 38,
+                                ),
+                              ),
+                            );
+                          }),
+                        ),
+                        const SizedBox(height: 32),
+
+                        // ── Buttons ─────────────────────────────────────────
+                        Row(
+                          children: [
+                            Expanded(
+                              child: ElevatedButton(
+                                style: ElevatedButton.styleFrom(
+                                  backgroundColor: Colors.white10,
+                                  foregroundColor: Colors.white,
+                                  padding:
+                                      const EdgeInsets.symmetric(vertical: 16),
+                                  shape: RoundedRectangleBorder(
+                                      borderRadius: BorderRadius.circular(8)),
+                                ),
+                                onPressed: () {
+                                  Navigator.pop(context);
+                                  // rating 0 = skipped (Senin kodundaki parametre ismi)
+                                  _saveTestAndFinish(userRating: 0);
+                                },
+                                child: const Text('ATLA'),
+                              ),
+                            ),
+                            const SizedBox(width: 12),
+                            Expanded(
+                              child: ElevatedButton(
+                                style: ElevatedButton.styleFrom(
+                                  backgroundColor:
+                                      Colors.greenAccent.withOpacity(0.2),
+                                  foregroundColor: Colors.greenAccent,
+                                  padding:
+                                      const EdgeInsets.symmetric(vertical: 16),
+                                  shape: RoundedRectangleBorder(
+                                    borderRadius: BorderRadius.circular(8),
+                                    side: BorderSide(
+                                        color: Colors.greenAccent
+                                            .withOpacity(0.5)),
+                                  ),
+                                ),
+                                onPressed: () {
+                                  Navigator.pop(context);
+                                  _saveTestAndFinish(
+                                      userRating: selectedRating);
+                                },
+                                child: const Text(
+                                  'KAYDET',
+                                  style: TextStyle(fontWeight: FontWeight.bold),
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            );
+          },
+        );
       },
     );
   }
@@ -1465,7 +1726,7 @@ class _IsoComfortScreenState extends State<IsoComfortScreen> {
     _speedDeviation = sqrt(varianceSum / _speedHistory.length);
   }
 
-  Future<void> _calculateIsoComfort() async {
+  Future<void> _calculateIsoComfort({int userRating = 0}) async {
     if (_sessionRmsScores.isEmpty) {
       setState(() {
         _finalRmsAv = 0.0;
@@ -1517,6 +1778,8 @@ class _IsoComfortScreenState extends State<IsoComfortScreen> {
       'route_points': jsonEncode(_routeMap
           .map((ll) => {'lat': ll.latitude, 'lng': ll.longitude})
           .toList()),
+      // 0 = unrated/skipped; 1-5 = user's post-ride star rating.
+      'user_rating': userRating,
     };
 
     final int newSessionId = await DatabaseHelper.instance.insertTest(testData);

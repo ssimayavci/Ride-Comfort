@@ -22,7 +22,7 @@ class DatabaseHelper {
 
     return await openDatabase(
       path,
-      version: 8,
+      version: 9,
       onCreate: _createDB,
       onUpgrade: _upgradeDB,
       // SQLite disables foreign key enforcement by default. Without this,
@@ -59,7 +59,8 @@ CREATE TABLE tests (
   tire_info TEXT,
   phone_placement TEXT,
   route_points TEXT,
-  ai_report TEXT
+  ai_report TEXT,
+  user_rating INTEGER DEFAULT 0
 )
 ''');
 
@@ -143,6 +144,12 @@ CREATE TABLE global_hazards (
           hit_count INTEGER DEFAULT 1
         )
       ''');
+    }
+    if (oldVersion < 9) {
+      // User's 1-5 star ride comfort rating. DEFAULT 0 means unrated;
+      // existing rows are unaffected and never hit a NOT NULL violation.
+      await db.execute(
+          'ALTER TABLE tests ADD COLUMN user_rating INTEGER DEFAULT 0;');
     }
   }
 

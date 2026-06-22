@@ -23,6 +23,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:flutter_siri_suggestions/flutter_siri_suggestions.dart';
 
 import 'database_helper.dart';
+import 'azure_api_service.dart';
 import 'history_screen.dart';
 import 'settings_screen.dart';
 
@@ -1783,6 +1784,18 @@ class _IsoComfortScreenState extends State<IsoComfortScreen> {
     };
 
     final int newSessionId = await DatabaseHelper.instance.insertTest(testData);
+
+    // İŞTE EKSİK OLAN O SİHİRLİ SATIR BURASI:
+    // SQLite'ın verdiği ID'yi alıp paketin içine "test_name" olarak ekliyoruz.
+    testData['test_name'] = "Test_$newSessionId";
+
+    // Offline-first cloud sync: fire-and-forget, does not block the UI.
+    AzureApiService.sendTestToAzure(testData).then((success) {
+      if (success) {
+        print("Test No: ${testData['test_name']} başarıyla buluta kopyalandı.");
+      }
+    });
+
     for (var anomaly in _sessionAnomalies) {
       anomaly['session_id'] = newSessionId;
       await DatabaseHelper.instance.insertAnomaly(anomaly);

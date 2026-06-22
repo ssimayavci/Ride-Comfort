@@ -38,4 +38,39 @@ class AzureApiService {
       return false;
     }
   }
+
+  // Buluttaki tüm sürüş lokasyonlarını, RMS ve kullanıcı puanlarını çeken fonksiyon
+  static Future<List<Map<String, dynamic>>> fetchGlobalLocations() async {
+    try {
+      final String apiUrl = dotenv.env['AZURE_API_URL'] ?? '';
+      if (apiUrl.isEmpty) return [];
+
+      // .env dosyasındaki URL'in sonuna /locations ekliyoruz
+      // (Örn: http://IP_ADRESI:80/api/tests/locations)
+      final String getUrl = apiUrl.endsWith('/api/tests')
+          ? '$apiUrl/locations'
+          : '$apiUrl/api/tests/locations';
+
+      final response = await http.get(
+        Uri.parse(getUrl),
+        headers: {"Accept": "application/json; charset=utf-8"},
+      );
+
+      if (response.statusCode == 200) {
+        // Türkçe karakter sorunu olmaması için utf8 ile decode ediyoruz
+        final data = jsonDecode(utf8.decode(response.bodyBytes));
+        if (data['status'] == 'success') {
+          print(
+              "BAŞARILI: Harita verileri Azure'dan çekildi! Toplam: ${data['locations'].length} sürüş.");
+          return List<Map<String, dynamic>>.from(data['locations']);
+        }
+      } else {
+        print("HATA: Veriler çekilemedi. Sunucu Kodu: ${response.statusCode}");
+      }
+      return [];
+    } catch (e) {
+      print("BAĞLANTI HATASI: Harita verileri alınamadı. Detay: $e");
+      return [];
+    }
+  }
 }

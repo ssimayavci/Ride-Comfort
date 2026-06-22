@@ -9,6 +9,7 @@ import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart';
 import 'database_helper.dart';
 import 'ai_service.dart';
+import 'global_data_screen.dart';
 
 class HistoryScreen extends StatefulWidget {
   const HistoryScreen({super.key});
@@ -554,6 +555,17 @@ class _HistoryScreenState extends State<HistoryScreen> {
         centerTitle: true,
         iconTheme: const IconThemeData(color: Colors.white),
         actions: [
+          IconButton(
+            icon: const Icon(Icons.map, color: Colors.blueGrey),
+            onPressed: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (context) => const GlobalDataScreen(),
+                ),
+              );
+            },
+          ),
           IconButton(
             icon: const Icon(Icons.file_download, color: Colors.blueGrey),
             onPressed: () async {

@@ -752,6 +752,7 @@ class _IsoComfortScreenState extends State<IsoComfortScreen> {
 
   void _showPreTestDialog() {
     String tempPlacement = _selectedPhonePlacement;
+    bool isKvkkAccepted = false;
 
     showDialog(
       context: context,
@@ -944,7 +945,42 @@ class _IsoComfortScreenState extends State<IsoComfortScreen> {
                           ),
                         ),
                       ),
-                      const SizedBox(height: 32),
+                      const SizedBox(height: 24),
+                      // ── KVKK consent checkbox ────────────────────────────
+                      Row(
+                        crossAxisAlignment: CrossAxisAlignment.center,
+                        children: [
+                          Checkbox(
+                            value: isKvkkAccepted,
+                            materialTapTargetSize:
+                                MaterialTapTargetSize.shrinkWrap,
+                            visualDensity: VisualDensity.compact,
+                            activeColor: Colors.greenAccent,
+                            checkColor: Colors.black,
+                            onChanged: (bool? value) {
+                              setDialogState(() {
+                                isKvkkAccepted = value ?? false;
+                              });
+                            },
+                          ),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: GestureDetector(
+                              onTap: () {
+                                setDialogState(() {
+                                  isKvkkAccepted = !isKvkkAccepted;
+                                });
+                              },
+                              child: const Text(
+                                "KVKK Aydınlatma Metni'ni okudum ve sensör/lokasyon verilerimin anonim olarak işlenmesini onaylıyorum.",
+                                style: TextStyle(
+                                    color: Colors.blueGrey, fontSize: 12),
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 16),
                       Row(
                         children: [
                           Expanded(
@@ -976,15 +1012,18 @@ class _IsoComfortScreenState extends State<IsoComfortScreen> {
                                         color: Colors.greenAccent
                                             .withOpacity(0.5))),
                               ),
-                              onPressed: () {
-                                // ── STEP 3: Manual start — mark as non-Siri.
-                                setState(() {
-                                  _selectedPhonePlacement = tempPlacement;
-                                  _startedViaSiri = false;
-                                });
-                                Navigator.pop(context);
-                                _startTest(); // async; fire-and-forget is fine here
-                              },
+                              onPressed: !isKvkkAccepted
+                                  ? null
+                                  : () {
+                                      // ── STEP 3: Manual start — mark as non-Siri.
+                                      setState(() {
+                                        _selectedPhonePlacement =
+                                            tempPlacement;
+                                        _startedViaSiri = false;
+                                      });
+                                      Navigator.pop(context);
+                                      _startTest(); // async; fire-and-forget is fine here
+                                    },
                               child: const Text('ONAYLA',
                                   style:
                                       TextStyle(fontWeight: FontWeight.bold)),
